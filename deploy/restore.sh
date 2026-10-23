@@ -13,7 +13,7 @@ case "$(cd "$(dirname "$f")" && pwd)" in
 *) echo "the dump must be in $(pwd)/backups" >&2; exit 1 ;;
 esac
 
-docker compose stop syncd caddy
+docker compose stop syncd
 docker compose up -d --wait db
 docker compose run --rm --no-deps -T backup restore "/backups/$(basename "$f")"
 docker compose run --rm --no-deps -T syncd verify

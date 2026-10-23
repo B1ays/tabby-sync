@@ -1,0 +1,17 @@
+# Run behind an nginx that already terminates TLS on this host, instead of
+# the bundled Caddy. Copy this file to deploy/compose.override.yaml: compose
+# loads it automatically, so "up", backup.sh, restore.sh and the cron jobs
+# all pick it up. See deploy/nginx/tabby-sync.conf for the nginx side.
+services:
+  # Caddy would fight nginx for ports 80/443; this profile is never enabled.
+  caddy:
+    profiles: [disabled]
+
+  syncd:
+    # Reachable from the host only; nginx proxies to it.
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      # nginx's connections arrive through the published port and come from
+      # the gateway of the "edge" network. Only that hop's X-Forwarded-For
+      # is believed.
+      TABBYSYNC_TRUSTED_PROXIES: 172.31.250.1

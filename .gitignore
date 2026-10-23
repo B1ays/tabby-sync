@@ -3,5 +3,6 @@
 /deploy/secrets/
 /deploy/backups/
 /deploy/.env
+/deploy/compose.override.yaml
 /deploy/tabby-sync.cron.installed
 coverage.out

@@ -64,6 +64,20 @@ docker compose run --rm syncd token create -user alice -name laptop
 
 Токен печатается один раз. Caddy получает сертификат Let's Encrypt; для этого DNS-запись домена должна указывать на сервер, порты 80/443 — открыты.
 
+**За существующим nginx.** Если на сервере уже есть nginx с TLS, встроенный Caddy не нужен (он займёт порты 80/443). Перед `docker compose up`:
+
+```bash
+sudo cp nginx/compose.override.yaml compose.override.yaml
+```
+
+Compose подхватывает этот файл сам, поэтому его увидят и `up`, и `backup.sh`, и `restore.sh`, и cron. Он отключает Caddy, публикует `syncd` только на `127.0.0.1:8080` и доверяет `X-Forwarded-For` только от шлюза Docker-сети, через которую приходит nginx. Затем добавьте сайт из [deploy/nginx/tabby-sync.conf](deploy/nginx/tabby-sync.conf), заменив домен и пути к сертификату (например, от certbot), и выполните `nginx -t && systemctl reload nginx`. Что в нём важно:
+- `client_max_body_size 8m`: со значением по умолчанию (1 МБ) большие конфиги получат `413`;
+- `X-Forwarded-For $remote_addr` перезаписывает заголовок, так что клиент не подставит свой адрес;
+- `Host $host`: по нему CSRF-защита сверяет `Origin`;
+- заголовки HSTS и CSP ставит само приложение, повторять их в nginx не нужно.
+
+Проверено с nginx 1.22 (Debian 12): HTTP→HTTPS, HTTP/2, загрузка 1.9 МБ, настоящий IP клиента в логах при поддельном `X-Forwarded-For`, CSRF-проверка `Origin`, бэкап и восстановление.
+
 **Вход через веб (OIDC).** Подходит любой провайдер OpenID Connect (Google, Microsoft Entra ID, GitLab, Keycloak, Authentik, Auth0…). GitHub — не OIDC и не поддерживается. Зарегистрируйте у провайдера приложение с redirect URI `https://<домен>/auth/<id>/callback`, положите client secret в файл и добавьте в `deploy/.env`:
 
 ```
