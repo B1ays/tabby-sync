@@ -1,0 +1,3 @@
+# LF everywhere, whatever core.autocrlf says: the scripts, cron file and
+# configs run on Linux, where CRLF breaks them, and gofmt writes LF.
+* text=auto eol=lf

@@ -1,0 +1,7 @@
+# tabby-sync maintenance, installed by setup.sh into /etc/cron.d.
+# Output goes to syslog / journal (journalctl -t tabby-sync-backup).
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+15 3 * * * root cd @DIR@ && ./backup.sh 2>&1 | logger -t tabby-sync-backup
+45 3 * * * root cd @DIR@ && docker compose run --rm --no-deps -T syncd purge 2>&1 | logger -t tabby-sync-purge

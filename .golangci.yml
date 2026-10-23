@@ -1,0 +1,34 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - gosec
+    - bodyclose
+    - errorlint
+    - noctx
+    - sqlclosecheck
+    - rowserrcheck
+    - nilerr
+    - misspell
+    - unconvert
+    - copyloopvar
+  settings:
+    errcheck:
+      exclude-functions:
+        # CLI table output to stdout.
+        - fmt.Fprintf
+        - fmt.Fprintln
+    gosec:
+      excludes:
+        # Integer conversions are bounded by validation (content size, revision counters).
+        - G115
+  exclusions:
+    rules:
+      - path: _test\.go|internal/testdb/
+        linters: [gosec, noctx, errcheck]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

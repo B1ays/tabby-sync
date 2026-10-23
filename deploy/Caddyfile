@@ -1,0 +1,8 @@
+{$TABBYSYNC_DOMAIN} {
+	request_body {
+		max_size 8MB
+	}
+	encode zstd gzip
+	reverse_proxy syncd:8080
+	header -Server
+}

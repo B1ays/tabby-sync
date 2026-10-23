@@ -1,0 +1,7 @@
+/syncd
+/syncd.exe
+/deploy/secrets/
+/deploy/backups/
+/deploy/.env
+/deploy/tabby-sync.cron.installed
+coverage.out

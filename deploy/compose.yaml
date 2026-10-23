@@ -1,0 +1,153 @@
+# Production-style single-host deployment: Postgres, a one-shot migration
+# job, the sync server, Caddy for TLS and an on-demand backup job.
+# Run ./setup.sh once first.
+name: tabby-sync
+
+# Bounded logs: without a limit the json-file driver grows until the disk is full.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: tabbysync
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_superuser_password
+    secrets: [db_superuser_password, db_owner_password, db_app_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "tabbysync"]
+      interval: 5s
+      retries: 20
+    shm_size: 128m
+    deploy:
+      resources:
+        limits: { memory: 512m, pids: 200 }
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  # Schema changes run as the owner role; the server itself has DML only.
+  migrate:
+    <<: *hardening
+    build: ..
+    image: tabby-sync:local
+    command: ["migrate", "up"]
+    environment:
+      TABBYSYNC_DATABASE_URL_FILE: /run/secrets/owner_database_url
+    secrets: [owner_database_url]
+    networks: [backend]
+    depends_on:
+      db: { condition: service_healthy }
+    deploy:
+      resources:
+        limits: { memory: 128m, pids: 50 }
+    logging: *logging
+    restart: "no"
+
+  syncd:
+    <<: *hardening
+    image: tabby-sync:local
+    command: ["serve"]
+    # OIDC settings (TABBYSYNC_OIDC_*, TABBYSYNC_ALLOWED_*) come from .env;
+    # client secrets are files in secrets/oidc/, see README.
+    env_file: [.env]
+    environment:
+      TABBYSYNC_DATABASE_URL_FILE: /run/secrets/app_database_url
+      TABBYSYNC_KEYRING_FILE: /run/secrets/keyring
+      TABBYSYNC_KEK_PRIMARY: ${TABBYSYNC_KEK_PRIMARY:?set in .env by setup.sh}
+      TABBYSYNC_PUBLIC_URL: https://${TABBYSYNC_DOMAIN}
+      TABBYSYNC_TRUSTED_PROXIES: 172.31.250.10
+      # Keeps the Go heap well under the container limit below.
+      GOMEMLIMIT: 200MiB
+    secrets: [app_database_url, keyring]
+    volumes:
+      - ./secrets/oidc:/run/oidc:ro
+    networks: [backend, edge]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    # The image has no shell or curl; the binary checks its own /readyz.
+    healthcheck:
+      test: ["CMD", "/syncd", "health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits: { memory: 256m, pids: 100 }
+    logging: *logging
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      TABBYSYNC_DOMAIN: ${TABBYSYNC_DOMAIN:?set in .env}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      edge: { ipv4_address: 172.31.250.10 }
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      syncd: { condition: service_healthy }
+    deploy:
+      resources:
+        limits: { memory: 128m, pids: 100 }
+    logging: *logging
+    restart: unless-stopped
+
+  # Not started by "up"; backup.sh runs it: docker compose run --rm backup dump
+  backup:
+    image: postgres:17-alpine
+    profiles: [tools]
+    entrypoint: ["/bin/sh", "/backup-db.sh"]
+    secrets: [db_superuser_password]
+    volumes:
+      - ./backup-db.sh:/backup-db.sh:ro
+      - ./backups:/backups
+    networks: [backend]
+    depends_on:
+      db: { condition: service_healthy }
+    deploy:
+      resources:
+        limits: { memory: 256m, pids: 50 }
+    logging: *logging
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  # No route out: the database is reachable only from the app containers.
+  backend:
+    internal: true
+  edge:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+
+secrets:
+  db_superuser_password: { file: ./secrets/db_superuser_password }
+  db_owner_password: { file: ./secrets/db_owner_password }
+  db_app_password: { file: ./secrets/db_app_password }
+  owner_database_url: { file: ./secrets/owner_database_url }
+  app_database_url: { file: ./secrets/app_database_url }
+  keyring: { file: ./secrets/keyring }
