@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -37,7 +38,11 @@ type Config struct {
 	// PublicURL is the externally visible origin (https://sync.example.com),
 	// used for OIDC redirect URIs. Required when OIDC is configured.
 	PublicURL string
-	OIDC      []OIDCProvider
+	// BasePath serves the whole service under a path prefix such as
+	// /services/tabby-sync, for an origin shared with other applications.
+	// Empty means the service owns the origin.
+	BasePath string
+	OIDC     []OIDCProvider
 	// Who may sign up on first login (verified email). Users pre-registered
 	// by an admin with "syncd user add -email" may always sign in.
 	AllowedEmails       []string
@@ -105,6 +110,7 @@ func Load() (*Config, error) {
 		CORSOrigins:         l.list("CORS_ALLOWED_ORIGINS", "*"),
 		LogLevel:            l.level("LOG_LEVEL", slog.LevelInfo),
 		PublicURL:           strings.TrimSuffix(l.str("PUBLIC_URL", ""), "/"),
+		BasePath:            strings.TrimSuffix(l.str("BASE_PATH", ""), "/"),
 		AllowedEmails:       lower(l.list("ALLOWED_EMAILS", "")),
 		AllowedEmailDomains: lower(l.list("ALLOWED_EMAIL_DOMAINS", "")),
 		Session: Session{
@@ -165,6 +171,16 @@ func Load() (*Config, error) {
 		}
 		c.OIDC = append(c.OIDC, op)
 	}
+	if c.BasePath != "" && !basePathRe.MatchString(c.BasePath) {
+		errs = append(errs, fmt.Errorf("%sBASE_PATH %q must look like /services/tabby-sync", prefix, c.BasePath))
+	}
+	if c.PublicURL != "" {
+		if u, err := url.Parse(c.PublicURL); err != nil || u.Host == "" {
+			errs = append(errs, errors.New(prefix+"PUBLIC_URL must be an absolute URL"))
+		} else if u.Path != c.BasePath {
+			errs = append(errs, fmt.Errorf("%sPUBLIC_URL path %q must equal BASE_PATH %q", prefix, u.Path, c.BasePath))
+		}
+	}
 	if len(c.OIDC) > 0 && !strings.HasPrefix(c.PublicURL, "https://") {
 		errs = append(errs, errors.New(prefix+"PUBLIC_URL (https://...) is required with OIDC"))
 	}
@@ -199,7 +215,19 @@ func (c *Config) RequireKeys() error {
 	return nil
 }
 
-var providerIDRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
+var (
+	providerIDRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
+	basePathRe   = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
+)
+
+// PublicOrigin is scheme://host of PublicURL, or "" if it is not set.
+func (c *Config) PublicOrigin() string {
+	u, err := url.Parse(c.PublicURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
 
 func lower(s []string) []string {
 	for i := range s {

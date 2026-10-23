@@ -67,7 +67,8 @@ services:
       TABBYSYNC_DATABASE_URL_FILE: /run/secrets/app_database_url
       TABBYSYNC_KEYRING_FILE: /run/secrets/keyring
       TABBYSYNC_KEK_PRIMARY: ${TABBYSYNC_KEK_PRIMARY:?set in .env by setup.sh}
-      TABBYSYNC_PUBLIC_URL: https://${TABBYSYNC_DOMAIN}
+      # TABBYSYNC_BASE_PATH (in .env) serves everything under a path prefix.
+      TABBYSYNC_PUBLIC_URL: https://${TABBYSYNC_DOMAIN}${TABBYSYNC_BASE_PATH:-}
       TABBYSYNC_TRUSTED_PROXIES: 172.31.250.10
       # Keeps the Go heap well under the container limit below.
       GOMEMLIMIT: 200MiB

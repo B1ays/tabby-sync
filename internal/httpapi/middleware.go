@@ -98,7 +98,10 @@ func (s *Server) observe(next http.Handler) http.Handler {
 	})
 }
 
-func securityHeaders(next http.Handler) http.Handler {
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	// HSTS covers the whole host and its subdomains; under a base path the
+	// origin belongs to someone else's nginx, which sets its own policy.
+	hsts := s.cfg.BasePath == ""
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Cache-Control", "no-store")
@@ -106,7 +109,9 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
 		h.Set("X-Frame-Options", "DENY")
-		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		if hsts {
+			h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

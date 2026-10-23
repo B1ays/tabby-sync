@@ -28,6 +28,8 @@ type Server struct {
 
 	providers map[string]*oidcProvider
 	tmpl      map[string]*template.Template
+
+	sessionCookie, flowCookie, cookiePath string
 }
 
 // Option customises a Server; used by tests.
@@ -50,8 +52,9 @@ func New(cfg *config.Config, log *slog.Logger, db *store.Store, svc *configs.Ser
 		failLimit:   newKeyedLimiter(rl.AuthFailPerMinute/60, rl.AuthFailBurst),
 		deviceLimit: newKeyedLimiter(rl.DeviceRate, rl.DeviceBurst),
 		providers:   newOIDCProviders(cfg, &http.Client{Timeout: 10 * time.Second}),
-		tmpl:        loadTemplates(),
+		tmpl:        loadTemplates(cfg.BasePath),
 	}
+	s.setCookieNames()
 	for _, o := range opts {
 		o(s)
 	}
@@ -73,8 +76,8 @@ func (s *Server) Handler() http.Handler {
 	web := http.NewServeMux()
 	s.routesWeb(web)
 	cop := http.NewCrossOriginProtection()
-	if s.cfg.PublicURL != "" {
-		_ = cop.AddTrustedOrigin(s.cfg.PublicURL)
+	if origin := s.cfg.PublicOrigin(); origin != "" {
+		_ = cop.AddTrustedOrigin(origin)
 	}
 	cop.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.log.WarnContext(r.Context(), "cross-origin request blocked", "path", r.URL.Path)
@@ -82,7 +85,19 @@ func (s *Server) Handler() http.Handler {
 	}))
 	mux.Handle("/", cop.Handler(web))
 
-	return s.observe(securityHeaders(s.cors(s.limitIP(mux))))
+	h := s.observe(s.securityHeaders(s.cors(s.limitIP(mux))))
+	if base := s.cfg.BasePath; base != "" {
+		// Everything lives under base; anything else is not ours (404).
+		strip := http.StripPrefix(base, h)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == base {
+				http.Redirect(w, r, base+"/", http.StatusMovedPermanently)
+				return
+			}
+			strip.ServeHTTP(w, r)
+		})
+	}
+	return h
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {

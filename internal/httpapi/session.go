@@ -16,15 +16,26 @@ import (
 	"tabbysync/internal/store"
 )
 
-// The __Host- prefix makes the browser insist on Secure, Path=/ and no
-// Domain attribute, so a sibling subdomain cannot set or overwrite it.
-const sessionCookie = "__Host-tabbysync_session"
+// setCookieNames picks cookie names and scope. When the service owns the
+// origin, the __Host- prefix makes the browser insist on Secure, Path=/ and
+// no Domain attribute, so a sibling subdomain cannot set or overwrite it.
+// Under a base path on a shared origin, cookies are limited to that path
+// instead, so other applications on the host never receive them; __Host-
+// requires Path=/, so the weaker __Secure- prefix is used.
+func (s *Server) setCookieNames() {
+	if s.cfg.BasePath == "" {
+		s.sessionCookie, s.flowCookie, s.cookiePath = "__Host-tabbysync_session", "__Host-tabbysync_flow", "/"
+		return
+	}
+	s.sessionCookie, s.flowCookie = "__Secure-tabbysync_session", "__Secure-tabbysync_flow"
+	s.cookiePath = s.cfg.BasePath + "/"
+}
 
-func setCookie(w http.ResponseWriter, name, value string, maxAge time.Duration) {
+func (s *Server) setCookie(w http.ResponseWriter, name, value string, maxAge time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    value,
-		Path:     "/",
+		Path:     s.cookiePath,
 		MaxAge:   int(maxAge.Seconds()),
 		Secure:   true,
 		HttpOnly: true,
@@ -32,9 +43,9 @@ func setCookie(w http.ResponseWriter, name, value string, maxAge time.Duration) 
 	})
 }
 
-func clearCookie(w http.ResponseWriter, name string) {
+func (s *Server) clearCookie(w http.ResponseWriter, name string) {
 	http.SetCookie(w, &http.Cookie{
-		Name: name, Value: "", Path: "/", MaxAge: -1,
+		Name: name, Value: "", Path: s.cookiePath, MaxAge: -1,
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -62,7 +73,7 @@ func (s webSession) actor() auth.Actor {
 // ends the session the browser had before, if any.
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u store.User, provider string) error {
 	ctx := r.Context()
-	if old, err := r.Cookie(sessionCookie); err == nil {
+	if old, err := r.Cookie(s.sessionCookie); err == nil {
 		if prev, err := s.db.ActiveSession(ctx, auth.HashToken(old.Value), s.cfg.Session.Idle); err == nil {
 			_ = s.db.DeleteSession(ctx, prev.UserID, prev.ID)
 		}
@@ -81,12 +92,12 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u store.Us
 	if err != nil {
 		return err
 	}
-	setCookie(w, sessionCookie, token, s.cfg.Session.MaxAge)
+	s.setCookie(w, s.sessionCookie, token, s.cfg.Session.MaxAge)
 	return nil
 }
 
 func (s *Server) currentSession(ctx context.Context, r *http.Request) (webSession, error) {
-	c, err := r.Cookie(sessionCookie)
+	c, err := r.Cookie(s.sessionCookie)
 	if err != nil || !auth.ValidTokenSyntax(c.Value) {
 		return webSession{}, store.ErrNotFound
 	}
@@ -111,7 +122,7 @@ func (s *Server) withSession(h func(http.ResponseWriter, *http.Request, webSessi
 		sess, err := s.currentSession(r.Context(), r)
 		if errors.Is(err, store.ErrNotFound) {
 			if r.Method == http.MethodGet {
-				http.Redirect(w, r, "/login?return_to="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+				s.redirect(w, r, "/login?return_to="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 				return
 			}
 			s.renderError(w, r, http.StatusUnauthorized, "Сессия истекла. Войдите снова.")

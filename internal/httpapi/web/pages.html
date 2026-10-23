@@ -4,7 +4,7 @@
   {{if .Providers}}
   <ul class="providers">
     {{range .Providers}}
-    <li><a class="button" href="/auth/{{.ID}}/login?return_to={{$.Data.ReturnTo}}">Войти через {{.Name}}</a></li>
+    <li><a class="button" href="{{base}}/auth/{{.ID}}/login?return_to={{$.Data.ReturnTo}}">Войти через {{.Name}}</a></li>
     {{end}}
   </ul>
   {{else}}
@@ -16,13 +16,13 @@
 {{define "error"}}
 <h1>{{.Title}}</h1>
 <p>{{.Data}}</p>
-<p><a href="/">На главную</a></p>
+<p><a href="{{base}}/">На главную</a></p>
 {{end}}
 
 {{define "reauth"}}
 <h1>Подтвердите вход</h1>
 <p>Для этого действия нужно войти заново: последний вход был слишком давно.</p>
-<p><a class="button" href="/auth/{{.Data.Provider}}/login?reauth=1&amp;return_to={{.Data.ReturnTo}}">Войти заново</a></p>
+<p><a class="button" href="{{base}}/auth/{{.Data.Provider}}/login?reauth=1&amp;return_to={{.Data.ReturnTo}}">Войти заново</a></p>
 {{end}}
 
 {{define "configs"}}
@@ -33,7 +33,7 @@
   <tbody>
   {{range .Data.Configs}}
   <tr>
-    <td><a href="/configs/{{.ID}}">{{.Name}}</a>{{if eq (deref $.Data.Active) .ID}} <span class="tag">активный</span>{{end}}</td>
+    <td><a href="{{base}}/configs/{{.ID}}">{{.Name}}</a>{{if eq (deref $.Data.Active) .ID}} <span class="tag">активный</span>{{end}}</td>
     <td>{{fmtTime .ModifiedAt}}</td>
     <td>{{.Revision}}</td>
     <td>{{size (len .Content)}}</td>
@@ -49,7 +49,7 @@
 
 {{define "config"}}
 {{with .Data}}
-<p><a href="/configs">← Все конфиги</a></p>
+<p><a href="{{base}}/configs">← Все конфиги</a></p>
 <h1>{{.Config.Name}}</h1>
 <p class="muted">Текущая ревизия {{.Config.Revision}}, изменён {{fmtTime .Config.ModifiedAt}}</p>
 <h2>История</h2>
@@ -58,13 +58,13 @@
   <tbody>
   {{range .Revisions}}
   <tr>
-    <td><a href="/configs/{{$.Data.Config.ID}}/revisions/{{.Revision}}">{{.Revision}}</a>
+    <td><a href="{{base}}/configs/{{$.Data.Config.ID}}/revisions/{{.Revision}}">{{.Revision}}</a>
       {{if eq .Revision $.Data.Config.Revision}} <span class="tag">текущая</span>{{end}}</td>
     <td>{{fmtTime .CreatedAt}}</td>
     <td>{{with .DeviceName}}{{.}}{{else}}веб или удалённое устройство{{end}}</td>
     <td>{{size .Size}}</td>
     <td>{{if ne .Revision $.Data.Config.Revision}}
-      <form method="post" action="/configs/{{$.Data.Config.ID}}/revisions/{{.Revision}}/restore">
+      <form method="post" action="{{base}}/configs/{{$.Data.Config.ID}}/revisions/{{.Revision}}/restore">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <input type="hidden" name="version" value="{{$.Data.Config.Version}}">
         <button type="submit">Восстановить</button>
@@ -79,10 +79,10 @@
 
 {{define "revision"}}
 {{with .Data}}
-<p><a href="/configs/{{.Config.ID}}">← История «{{.Config.Name}}»</a></p>
+<p><a href="{{base}}/configs/{{.Config.ID}}">← История «{{.Config.Name}}»</a></p>
 <h1>Ревизия {{.Revision}}{{if eq .Revision .Config.Revision}} <span class="tag">текущая</span>{{end}}</h1>
 {{if ne .Revision .Config.Revision}}
-<form method="post" action="/configs/{{.Config.ID}}/revisions/{{.Revision}}/restore">
+<form method="post" action="{{base}}/configs/{{.Config.ID}}/revisions/{{.Revision}}/restore">
   <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <input type="hidden" name="version" value="{{.Config.Version}}">
   <button type="submit">Восстановить эту ревизию</button>
@@ -97,7 +97,7 @@
 <h1>Устройства</h1>
 <p class="muted">У каждого устройства свой токен. Отозванный токен перестаёт работать сразу.</p>
 
-<form class="card" method="post" action="/devices">
+<form class="card" method="post" action="{{base}}/devices">
   <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <h2>Новое устройство</h2>
   <label>Название <input name="name" required maxlength="100" placeholder="Ноутбук"></label>
@@ -130,7 +130,7 @@
     <td>{{fmtTimePtr .ExpiresAt}}</td>
     <td>{{if .RevokedAt}}отозван{{else if expired .ExpiresAt}}истёк{{else}}активен{{end}}</td>
     <td>{{if not .RevokedAt}}
-      <form method="post" action="/devices/{{.ID}}/revoke">
+      <form method="post" action="{{base}}/devices/{{.ID}}/revoke">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <button type="submit">Отозвать</button>
       </form>{{end}}</td>
@@ -141,7 +141,7 @@
   </tbody>
 </table>
 {{if .Devices}}
-<form method="post" action="/devices/revoke-all">
+<form method="post" action="{{base}}/devices/revoke-all">
   <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <button type="submit" class="danger">Отозвать все токены</button>
 </form>
@@ -158,7 +158,7 @@
     <td>{{with .IP}}{{.}}{{end}}</td>
     <td class="ua">{{with .UserAgent}}{{.}}{{end}}</td>
     <td>{{if eq .ID $.Data.Current}}<span class="tag">эта сессия</span>{{else}}
-      <form method="post" action="/sessions/{{.ID}}/revoke">
+      <form method="post" action="{{base}}/sessions/{{.ID}}/revoke">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <button type="submit">Завершить</button>
       </form>{{end}}</td>
@@ -166,7 +166,7 @@
   {{end}}
   </tbody>
 </table>
-<form method="post" action="/sessions/revoke-others">
+<form method="post" action="{{base}}/sessions/revoke-others">
   <input type="hidden" name="csrf" value="{{$.CSRF}}">
   <button type="submit">Завершить все другие сессии</button>
 </form>
@@ -180,6 +180,6 @@
 <pre class="token">{{.Token}}</pre>
 <p>В Tabby: <b>Settings → Config sync</b>, укажите адрес сервера <code>{{.ServerURL}}</code> и этот токен.</p>
 <p class="muted">Права: {{join .Scopes ", "}}. Истекает: {{fmtTimePtr .ExpiresAt}}.</p>
-<p><a href="/devices">← К устройствам</a></p>
+<p><a href="{{base}}/devices">← К устройствам</a></p>
 {{end}}
 {{end}}

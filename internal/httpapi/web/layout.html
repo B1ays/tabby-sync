@@ -5,17 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>{{.Title}} · Tabby Sync</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="{{base}}/static/style.css">
 </head>
 <body>
 <header>
-  <a class="brand" href="/">Tabby Sync</a>
+  <a class="brand" href="{{base}}/">Tabby Sync</a>
   {{if .Session}}
   <nav>
-    <a href="/configs">Конфиги</a>
-    <a href="/devices">Устройства и сессии</a>
+    <a href="{{base}}/configs">Конфиги</a>
+    <a href="{{base}}/devices">Устройства и сессии</a>
   </nav>
-  <form class="logout" method="post" action="/logout">
+  <form class="logout" method="post" action="{{base}}/logout">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <span class="muted">{{.Session.User.Username}}</span>
     <button type="submit">Выйти</button>

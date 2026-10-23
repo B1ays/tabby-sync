@@ -30,8 +30,10 @@ const webCSP = "default-src 'none'; style-src 'self'; img-src 'self'; form-actio
 
 var pageNames = []string{"login", "error", "reauth", "configs", "config", "revision", "devices", "token"}
 
-func loadTemplates() map[string]*template.Template {
+func loadTemplates(basePath string) map[string]*template.Template {
 	funcs := template.FuncMap{
+		// Prefix for every link and form action: the service may live under a path.
+		"base":    func() string { return basePath },
 		"fmtTime": func(t time.Time) string { return t.Local().Format("2006-01-02 15:04:05") },
 		"fmtTimePtr": func(t *time.Time) string {
 			if t == nil {
@@ -110,10 +112,10 @@ func (s *Server) routesWeb(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.currentSession(r.Context(), r); err == nil {
-			http.Redirect(w, r, "/configs", http.StatusSeeOther)
+			s.redirect(w, r, "/configs", http.StatusSeeOther)
 			return
 		}
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		s.redirect(w, r, "/login", http.StatusSeeOther)
 	})
 	mux.HandleFunc("GET /login", s.loginPage)
 	mux.HandleFunc("GET /auth/{provider}/login", s.oidcLogin)
@@ -149,8 +151,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, sess webSession)
 	if err := s.db.DeleteSession(r.Context(), sess.UserID, sess.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		s.log.ErrorContext(r.Context(), "logout", "err", err)
 	}
-	clearCookie(w, sessionCookie)
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	s.clearCookie(w, s.sessionCookie)
+	s.redirect(w, r, "/login", http.StatusSeeOther)
 }
 
 func (s *Server) configsPage(w http.ResponseWriter, r *http.Request, sess webSession) {
@@ -223,14 +225,14 @@ func (s *Server) restoreRevision(w http.ResponseWriter, r *http.Request, sess we
 	_, err = s.configs.Restore(r.Context(), sess.actor(), id, rev, version)
 	var perr *configs.PreconditionError
 	if errors.As(err, &perr) {
-		http.Redirect(w, r, fmt.Sprintf("/configs/%d?flash=changed", id), http.StatusSeeOther) //nolint:gosec // local path built from a parsed integer
+		s.redirect(w, r, fmt.Sprintf("/configs/%d?flash=changed", id), http.StatusSeeOther) //nolint:gosec // local path built from a parsed integer
 		return
 	}
 	if err != nil {
 		s.webError(w, r, err)
 		return
 	}
-	http.Redirect(w, r, fmt.Sprintf("/configs/%d?flash=restored", id), http.StatusSeeOther) //nolint:gosec // local path built from a parsed integer
+	s.redirect(w, r, fmt.Sprintf("/configs/%d?flash=restored", id), http.StatusSeeOther) //nolint:gosec // local path built from a parsed integer
 }
 
 // flash maps a fixed set of codes to messages, so the query string cannot
@@ -334,7 +336,7 @@ func (s *Server) revokeDevice(w http.ResponseWriter, r *http.Request, sess webSe
 		return
 	}
 	s.log.InfoContext(r.Context(), "device token revoked", "user_id", sess.UserID, "device_id", id)
-	http.Redirect(w, r, "/devices?flash=revoked", http.StatusSeeOther)
+	s.redirect(w, r, "/devices?flash=revoked", http.StatusSeeOther)
 }
 
 func (s *Server) revokeAllDevices(w http.ResponseWriter, r *http.Request, sess webSession) {
@@ -344,7 +346,7 @@ func (s *Server) revokeAllDevices(w http.ResponseWriter, r *http.Request, sess w
 		return
 	}
 	s.log.InfoContext(r.Context(), "all device tokens revoked", "user_id", sess.UserID, "count", n)
-	http.Redirect(w, r, "/devices?flash=revoked", http.StatusSeeOther)
+	s.redirect(w, r, "/devices?flash=revoked", http.StatusSeeOther)
 }
 
 func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request, sess webSession) {
@@ -357,11 +359,11 @@ func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request, sess webS
 		return
 	}
 	if id == sess.ID {
-		clearCookie(w, sessionCookie)
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		s.clearCookie(w, s.sessionCookie)
+		s.redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, "/devices?flash=revoked", http.StatusSeeOther)
+	s.redirect(w, r, "/devices?flash=revoked", http.StatusSeeOther)
 }
 
 func (s *Server) revokeOtherSessions(w http.ResponseWriter, r *http.Request, sess webSession) {
@@ -369,7 +371,7 @@ func (s *Server) revokeOtherSessions(w http.ResponseWriter, r *http.Request, ses
 		s.webError(w, r, err)
 		return
 	}
-	http.Redirect(w, r, "/devices?flash=revoked", http.StatusSeeOther)
+	s.redirect(w, r, "/devices?flash=revoked", http.StatusSeeOther)
 }
 
 func (s *Server) webError(w http.ResponseWriter, r *http.Request, err error) {
@@ -385,7 +387,14 @@ func (s *Server) publicURL(r *http.Request) string {
 	if s.cfg.PublicURL != "" {
 		return s.cfg.PublicURL
 	}
-	return "https://" + r.Host
+	return "https://" + r.Host + s.cfg.BasePath
+}
+
+// redirect sends the browser to a path of this service. Callers pass
+// fixed paths or a return_to already checked by safeReturnTo, and BasePath
+// is validated at startup, so the target is always local.
+func (s *Server) redirect(w http.ResponseWriter, r *http.Request, path string, code int) {
+	http.Redirect(w, r, s.cfg.BasePath+path, code) //nolint:gosec // see above
 }
 
 func pathRev(r *http.Request) (int32, bool) {

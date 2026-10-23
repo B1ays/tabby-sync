@@ -23,10 +23,7 @@ import (
 	"tabbysync/internal/store"
 )
 
-const (
-	flowCookie = "__Host-tabbysync_flow"
-	flowTTL    = 10 * time.Minute
-)
+const flowTTL = 10 * time.Minute
 
 // oidcProvider performs discovery lazily and retries on failure, so the
 // server starts even while an identity provider is unreachable.
@@ -127,7 +124,7 @@ func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 		s.log.ErrorContext(r.Context(), "create oidc flow", "err", err)
 		return
 	}
-	setCookie(w, flowCookie, flowID, flowTTL)
+	s.setCookie(w, s.flowCookie, flowID, flowTTL)
 
 	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(flow.PKCEVerifier), oidc.Nonce(flow.Nonce)}
 	if flow.Reauth {
@@ -158,8 +155,8 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, status, msg)
 	}
 
-	c, err := r.Cookie(flowCookie)
-	clearCookie(w, flowCookie)
+	c, err := r.Cookie(s.flowCookie)
+	s.clearCookie(w, s.flowCookie)
 	if err != nil {
 		fail(http.StatusBadRequest, "Сеанс входа не найден или истёк. Начните вход заново.", "no flow cookie")
 		return
@@ -242,7 +239,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.InfoContext(ctx, "web login", "user_id", user.ID, "provider", flow.Provider, "reauth", flow.Reauth)
-	http.Redirect(w, r, flow.ReturnTo, http.StatusSeeOther)
+	s.redirect(w, r, flow.ReturnTo, http.StatusSeeOther)
 }
 
 // resolveUser maps an OIDC identity to a user. Identity is (issuer,

@@ -104,7 +104,7 @@ func (s *Server) createConfig(w http.ResponseWriter, r *http.Request, a auth.Act
 		return
 	}
 	w.Header().Set("ETag", etag(c.Version))
-	w.Header().Set("Location", "/api/1/configs/"+strconv.FormatInt(c.ID, 10))
+	w.Header().Set("Location", s.cfg.BasePath+"/api/1/configs/"+strconv.FormatInt(c.ID, 10))
 	writeJSON(w, http.StatusCreated, toJSON(c))
 }
 

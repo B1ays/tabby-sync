@@ -78,6 +78,12 @@ Compose подхватывает этот файл сам, поэтому его
 
 Проверено с nginx 1.22 (Debian 12): HTTP→HTTPS, HTTP/2, загрузка 1.9 МБ, настоящий IP клиента в логах при поддельном `X-Forwarded-For`, CSRF-проверка `Origin`, бэкап и восстановление.
 
+**Под путём на общем домене.** Если сервис должен жить не в корне домена, а, например, на `https://example.com/services/tabby-sync/` рядом с другими приложениями, добавьте в `deploy/.env` строку `TABBYSYNC_BASE_PATH=/services/tabby-sync`, а в существующий `server { ... }` nginx — блок из [deploy/nginx/tabby-sync-location.conf](deploy/nginx/tabby-sync-location.conf) (порт — как в `compose.override.yaml`). При этом:
+- сервис сам снимает префикс и отвечает `404` на всё вне него; ссылки, редиректы и `Location` содержат префикс;
+- cookie сессии получают `Path=<префикс>/` и приставку `__Secure-` вместо `__Host-` (та требует `Path=/`), поэтому другие приложения домена их не получают;
+- HSTS не отправляется: политика домена — дело его nginx, а `includeSubDomains` от одного сервиса задело бы все поддомены;
+- в Tabby адрес сервера указывается вместе с префиксом: `https://example.com/services/tabby-sync`.
+
 **Вход через веб (OIDC).** Подходит любой провайдер OpenID Connect (Google, Microsoft Entra ID, GitLab, Keycloak, Authentik, Auth0…). GitHub — не OIDC и не поддерживается. Зарегистрируйте у провайдера приложение с redirect URI `https://<домен>/auth/<id>/callback`, положите client secret в файл и добавьте в `deploy/.env`:
 
 ```
@@ -185,6 +191,7 @@ syncd health                                   # healthcheck контейнер�
 | `TABBYSYNC_RATE_AUTH_FAIL_PER_MIN` / `_BURST` | 10 / 10 | неудачные токены с IP |
 | `TABBYSYNC_RATE_DEVICE_RPS` / `_BURST` | 5 / 30 | на устройство |
 | `TABBYSYNC_LOG_LEVEL` | `info` | |
+| `TABBYSYNC_BASE_PATH` | — | префикс пути на общем домене, например `/services/tabby-sync` |
 | `TABBYSYNC_PUBLIC_URL` | — | `https://домен`, обязателен с OIDC (в compose задаётся из `TABBYSYNC_DOMAIN`) |
 | `TABBYSYNC_OIDC_PROVIDERS` | — | id провайдеров через запятую; для каждого `TABBYSYNC_OIDC_<ID>_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET` / `_FILE`, `_NAME`, `_SCOPES` |
 | `TABBYSYNC_ALLOWED_EMAILS` / `_EMAIL_DOMAINS` | — | кому разрешена регистрация при первом входе |

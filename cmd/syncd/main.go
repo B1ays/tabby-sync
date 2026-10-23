@@ -429,7 +429,7 @@ func health(cfg *config.Config) error {
 		}
 	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
-		scheme+"://"+net.JoinHostPort(host, port)+"/readyz", nil)
+		scheme+"://"+net.JoinHostPort(host, port)+cfg.BasePath+"/readyz", nil)
 	if err != nil {
 		return err
 	}

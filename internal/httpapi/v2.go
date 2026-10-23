@@ -201,7 +201,7 @@ func (s *Server) createConfigV2(w http.ResponseWriter, r *http.Request, a auth.A
 			return err
 		}
 		out.Header().Set("ETag", etag(c.Version))
-		out.Header().Set("Location", "/api/2/configs/"+strconv.FormatInt(c.ID, 10))
+		out.Header().Set("Location", s.cfg.BasePath+"/api/2/configs/"+strconv.FormatInt(c.ID, 10))
 		writeJSON(out, http.StatusCreated, metaV2(c))
 		return nil
 	})
