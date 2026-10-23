@@ -32,21 +32,29 @@ import (
 const idempotencyTTL = 24 * time.Hour
 
 type configMetaV2 struct {
-	ID                  int64     `json:"id"`
-	Name                string    `json:"name"`
-	Version             int64     `json:"version"`
-	Revision            int32     `json:"revision"`
-	Size                int       `json:"size"`
-	ContentDigest       string    `json:"content_digest"`
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Version  int64  `json:"version"`
+	Revision int32  `json:"revision"`
+	Size     int    `json:"size"`
+	// Omitted in listings, which do not decrypt the configs.
+	ContentDigest       string    `json:"content_digest,omitempty"`
 	LastUsedWithVersion *string   `json:"last_used_with_version"`
 	CreatedAt           time.Time `json:"created_at"`
 	ModifiedAt          time.Time `json:"modified_at"`
 }
 
+// metaV2 describes a config whose content is loaded, digest included.
 func metaV2(c configs.Config) configMetaV2 {
+	m := listMetaV2(c)
+	m.ContentDigest = reprDigest([]byte(c.Content))
+	return m
+}
+
+// listMetaV2 describes a config from ListMeta, without content or digest.
+func listMetaV2(c configs.Config) configMetaV2 {
 	return configMetaV2{
-		ID: c.ID, Name: c.Name, Version: c.Version, Revision: c.Revision,
-		Size: len(c.Content), ContentDigest: reprDigest([]byte(c.Content)),
+		ID: c.ID, Name: c.Name, Version: c.Version, Revision: c.Revision, Size: c.Size,
 		LastUsedWithVersion: c.LastUsedWithVersion, CreatedAt: c.CreatedAt, ModifiedAt: c.ModifiedAt,
 	}
 }
@@ -74,14 +82,14 @@ func (s *Server) routesV2(mux *http.ServeMux) {
 }
 
 func (s *Server) listConfigsV2(w http.ResponseWriter, r *http.Request, a auth.Actor) {
-	list, err := s.configs.List(r.Context(), a)
+	list, err := s.configs.ListMeta(r.Context(), a)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	out := make([]configMetaV2, len(list))
 	for i, c := range list {
-		out[i] = metaV2(c)
+		out[i] = listMetaV2(c)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

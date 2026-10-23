@@ -16,6 +16,12 @@ keep_min=${TABBYSYNC_BACKUP_KEEP_MIN:-7}
 
 log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
 cleanup() { docker compose run --rm --no-deps -T backup cleanup >/dev/null 2>&1 || true; }
+
+# One backup or restore at a time: backups share the scratch database and a
+# restore replaces the live one. Taken before the trap, so a run that loses
+# the race never drops the other run's scratch database.
+exec 9>>backups/.lock
+flock -n 9 || { log "BACKUP SKIPPED: another backup or restore is running"; exit 1; }
 trap cleanup EXIT
 
 ts=$(date -u +%Y%m%dT%H%M%SZ)
@@ -36,7 +42,8 @@ ls -1t backups/tabbysync-2*.dump | tail -n +"$((keep_min + 1))" | while read -r 
 		rm -f "$old" "$old.sha256" "backups/tabbysync-roles-$stamp.sql"
 	fi
 done
-find backups -maxdepth 1 -name 'tabbysync-*.unverified' -mtime +"$keep_days" -delete
+find backups -maxdepth 1 \( -name 'tabbysync-*.unverified' -o -name 'tabbysync-prerestore-*' \) \
+	-mtime +"$keep_days" -delete
 
 date -u +%Y-%m-%dT%H:%M:%SZ > backups/LAST_SUCCESS
 log "backup ok: backups/tabbysync-$ts.dump"

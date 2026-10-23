@@ -27,23 +27,35 @@ const flowTTL = 10 * time.Minute
 
 // oidcProvider performs discovery lazily and retries on failure, so the
 // server starts even while an identity provider is unreachable.
+//
+// Discovery runs without holding the mutex: one request performs it while
+// concurrent ones wait for its result (or their own deadline), and a failure
+// is remembered for retryAfter, so an unreachable provider costs one network
+// timeout per interval instead of one per login.
 type oidcProvider struct {
-	cfg      config.OIDCProvider
-	redirect string
-	client   *http.Client
+	cfg        config.OIDCProvider
+	redirect   string
+	client     *http.Client
+	timeout    time.Duration
+	retryAfter time.Duration
 
 	mu       sync.Mutex
 	oauth    *oauth2.Config
 	verifier *oidc.IDTokenVerifier
+	inflight chan struct{} // closed when the running discovery finishes
+	lastErr  error
+	failedAt time.Time
 }
 
 func newOIDCProviders(cfg *config.Config, client *http.Client) map[string]*oidcProvider {
 	out := map[string]*oidcProvider{}
 	for _, p := range cfg.OIDC {
 		out[p.ID] = &oidcProvider{
-			cfg:      p,
-			redirect: cfg.PublicURL + "/auth/" + p.ID + "/callback",
-			client:   client,
+			cfg:        p,
+			redirect:   cfg.PublicURL + "/auth/" + p.ID + "/callback",
+			client:     client,
+			timeout:    10 * time.Second,
+			retryAfter: 30 * time.Second,
 		}
 	}
 	return out
@@ -55,28 +67,63 @@ func (p *oidcProvider) ctx(ctx context.Context) context.Context {
 }
 
 func (p *oidcProvider) init(ctx context.Context) (*oauth2.Config, *oidc.IDTokenVerifier, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.oauth != nil {
-		return p.oauth, p.verifier, nil
+	for {
+		p.mu.Lock()
+		if p.oauth != nil {
+			oauthCfg, verifier := p.oauth, p.verifier
+			p.mu.Unlock()
+			return oauthCfg, verifier, nil
+		}
+		if p.lastErr != nil && time.Since(p.failedAt) < p.retryAfter {
+			err := p.lastErr
+			p.mu.Unlock()
+			return nil, nil, err
+		}
+		if wait := p.inflight; wait != nil {
+			p.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+		}
+		done := make(chan struct{})
+		p.inflight = done
+		p.mu.Unlock()
+
+		oauthCfg, verifier, err := p.discover(ctx)
+
+		p.mu.Lock()
+		p.inflight = nil
+		if err != nil {
+			p.lastErr, p.failedAt = err, time.Now()
+		} else {
+			p.oauth, p.verifier, p.lastErr = oauthCfg, verifier, nil
+		}
+		close(done)
+		p.mu.Unlock()
+		return oauthCfg, verifier, err
 	}
+}
+
+func (p *oidcProvider) discover(ctx context.Context) (*oauth2.Config, *oidc.IDTokenVerifier, error) {
 	// The provider keeps the client from this context for fetching keys
 	// later, so it must not be tied to the request's lifetime.
-	dctx, cancel := context.WithTimeout(p.ctx(context.WithoutCancel(ctx)), 10*time.Second)
+	dctx, cancel := context.WithTimeout(p.ctx(context.WithoutCancel(ctx)), p.timeout)
 	defer cancel()
 	prov, err := oidc.NewProvider(dctx, p.cfg.Issuer)
 	if err != nil {
 		return nil, nil, fmt.Errorf("oidc discovery for %s: %w", p.cfg.ID, err)
 	}
-	p.oauth = &oauth2.Config{
+	oauthCfg := &oauth2.Config{
 		ClientID:     p.cfg.ClientID,
 		ClientSecret: p.cfg.ClientSecret,
 		Endpoint:     prov.Endpoint(),
 		RedirectURL:  p.redirect,
 		Scopes:       p.cfg.Scopes,
 	}
-	p.verifier = prov.Verifier(&oidc.Config{ClientID: p.cfg.ClientID})
-	return p.oauth, p.verifier, nil
+	return oauthCfg, prov.Verifier(&oidc.Config{ClientID: p.cfg.ClientID}), nil
 }
 
 func randomString(n int) string {

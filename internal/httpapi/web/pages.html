@@ -36,7 +36,7 @@
     <td><a href="{{base}}/configs/{{.ID}}">{{.Name}}</a>{{if eq (deref $.Data.Active) .ID}} <span class="tag">активный</span>{{end}}</td>
     <td>{{fmtTime .ModifiedAt}}</td>
     <td>{{.Revision}}</td>
-    <td>{{size (len .Content)}}</td>
+    <td>{{size .Size}}</td>
     <td>{{with .LastUsedWithVersion}}{{.}}{{else}}—{{end}}</td>
   </tr>
   {{end}}

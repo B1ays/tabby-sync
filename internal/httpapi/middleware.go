@@ -19,6 +19,7 @@ import (
 type reqInfo struct {
 	id       string
 	ip       string
+	limitKey string // client network for rate limiting, see clientKey
 	deviceID string
 }
 
@@ -68,7 +69,8 @@ func (s *Server) observe(next http.Handler) http.Handler {
 		start := time.Now()
 		var idb [12]byte
 		_, _ = rand.Read(idb[:])
-		ri := &reqInfo{id: hex.EncodeToString(idb[:]), ip: clientIP(r, s.cfg.TrustedProxies).String()}
+		addr := clientIP(r, s.cfg.TrustedProxies)
+		ri := &reqInfo{id: hex.EncodeToString(idb[:]), ip: addr.String(), limitKey: clientKey(addr)}
 		r = r.WithContext(context.WithValue(r.Context(), reqInfoKey{}, ri))
 		w.Header().Set("X-Request-ID", ri.id)
 		sw := &statusWriter{ResponseWriter: w}
@@ -157,7 +159,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 
 func (s *Server) limitIP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.ipLimit.Allow(infoFrom(r.Context()).ip) {
+		if !s.ipLimit.Allow(infoFrom(r.Context()).limitKey) {
 			tooMany(w, r, 1)
 			return
 		}
@@ -176,7 +178,7 @@ func tooMany(w http.ResponseWriter, r *http.Request, retryAfter int) {
 func (s *Server) authed(scope string, h func(http.ResponseWriter, *http.Request, auth.Actor)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ri := infoFrom(r.Context())
-		if s.failLimit.Exhausted(ri.ip) {
+		if s.failLimit.Exhausted(ri.limitKey) {
 			tooMany(w, r, 60)
 			return
 		}
@@ -187,7 +189,7 @@ func (s *Server) authed(scope string, h func(http.ResponseWriter, *http.Request,
 		}
 		actor, err := s.authn.Authenticate(r.Context(), token)
 		if errors.Is(err, auth.ErrInvalidToken) {
-			s.failLimit.Allow(ri.ip)
+			s.failLimit.Allow(ri.limitKey)
 			unauthorized(w, r, "invalid_token")
 			return
 		}

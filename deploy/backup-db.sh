@@ -1,8 +1,9 @@
 #!/bin/sh
 # Runs inside the "backup" container (postgres image) as the database
-# superuser. Called by backup.sh on the host:
+# superuser. Called by backup.sh and restore.sh on the host:
 #   dump TS          write tabbysync-TS.dump.unverified and restore it into a
 #                    scratch database; backup.sh renames it once verified
+#   snapshot TS      write tabbysync-prerestore-TS.dump of the live database
 #   cleanup          drop the scratch database
 #   restore FILE     replace the live database with a verified dump
 set -eu
@@ -38,6 +39,16 @@ dump)
 	q -d "$check" -c "GRANT USAGE ON SCHEMA tabbysync TO tabbysync_app;
 		GRANT SELECT ON ALL TABLES IN SCHEMA tabbysync TO tabbysync_app" >/dev/null
 	;;
+snapshot)
+	# A plain copy of the live database, taken by restore.sh before it
+	# overwrites it, so a restore from the wrong dump can be undone.
+	ts=${2:?usage: backup-db.sh snapshot TIMESTAMP}
+	name=tabbysync-prerestore-$ts.dump
+	pg_dump -Fc -d tabbysync -f "/backups/$name.partial"
+	mv "/backups/$name.partial" "/backups/$name"
+	(cd /backups && sha256sum "$name" > "$name.sha256")
+	echo "snapshot: /backups/$name ($(wc -c < "/backups/$name") bytes)"
+	;;
 cleanup)
 	dropdb --if-exists --force "$check"
 	;;
@@ -49,7 +60,7 @@ restore)
 	echo "restored $f: schema version $(q -d tabbysync -c "SELECT max(version_id) FROM tabbysync.goose_db_version WHERE is_applied")"
 	;;
 *)
-	echo "usage: backup-db.sh dump|cleanup|restore FILE" >&2
+	echo "usage: backup-db.sh dump TS|snapshot TS|cleanup|restore FILE" >&2
 	exit 2
 	;;
 esac

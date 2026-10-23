@@ -536,6 +536,10 @@ func TestHistoryAndRestore(t *testing.T) {
 	if len(revs) != 4 {
 		t.Fatalf("history has %d revisions", len(revs))
 	}
+	// The listing shows the size of the current revision without decrypting.
+	if p := get(t, b, e.url+"/configs"); !strings.Contains(p.body, "<td>4 Б</td>") {
+		t.Fatalf("configs page lacks the size of %q:\n%s", after.Content, p.body)
+	}
 }
 
 func TestWebObjectLevelAuthorization(t *testing.T) {

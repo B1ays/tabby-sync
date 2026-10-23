@@ -55,19 +55,33 @@ func scanConfigWithContent(row interface{ Scan(...any) error }) (ConfigWithConte
 	return c, notFound(err)
 }
 
-func (q *Queries) ListConfigs(ctx context.Context, userID int64) ([]ConfigWithContent, error) {
-	rows, err := q.db.Query(ctx, configWithContentSelect+` ORDER BY c.id`, userID)
+// ConfigMeta is a config with the size of its current revision but without
+// its content, for listings that must not decrypt everything.
+type ConfigMeta struct {
+	Config
+	Size int32
+}
+
+func (q *Queries) ListConfigMeta(ctx context.Context, userID int64) ([]ConfigMeta, error) {
+	rows, err := q.db.Query(ctx, `
+		SELECT c.id, c.user_id, c.name, c.version, c.current_revision, c.last_used_with_version,
+		       c.created_at, c.modified_at, r.size
+		FROM configs c
+		JOIN config_revisions r ON r.config_id = c.id AND r.revision = c.current_revision
+		WHERE c.user_id = $1 AND c.deleted_at IS NULL
+		ORDER BY c.id`, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ConfigWithContent
+	var out []ConfigMeta
 	for rows.Next() {
-		c, err := scanConfigWithContent(rows)
-		if err != nil {
+		var m ConfigMeta
+		if err := rows.Scan(&m.ID, &m.UserID, &m.Name, &m.Version, &m.CurrentRevision, &m.LastUsedWithVersion,
+			&m.CreatedAt, &m.ModifiedAt, &m.Size); err != nil {
 			return nil, err
 		}
-		out = append(out, c)
+		out = append(out, m)
 	}
 	return out, rows.Err()
 }

@@ -49,6 +49,7 @@ type Config struct {
 	UserID              int64
 	Name                string
 	Content             string
+	Size                int // of the content; also set by ListMeta, which leaves Content empty
 	Version             int64
 	Revision            int32
 	LastUsedWithVersion *string
@@ -74,20 +75,43 @@ type Patch struct {
 
 const emptyContent = "{}"
 
-func (s *Service) List(ctx context.Context, a auth.Actor) ([]Config, error) {
-	rows, err := s.DB.ListConfigs(ctx, a.UserID)
+// ListMeta lists the user's configs without decrypting them: Content is
+// empty, Size is that of the current revision. Listings must not hold every
+// config in memory at once (up to MaxConfigsPerUser × MaxConfigBytes).
+func (s *Service) ListMeta(ctx context.Context, a auth.Actor) ([]Config, error) {
+	rows, err := s.DB.ListConfigMeta(ctx, a.UserID)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Config, 0, len(rows))
-	for _, r := range rows {
-		c, err := s.decrypt(r)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, c)
+	out := make([]Config, len(rows))
+	for i, r := range rows {
+		out[i] = fromRow(r.Config, "")
+		out[i].Size = int(r.Size)
 	}
 	return out, nil
+}
+
+// Each decrypts the user's configs one at a time and passes each to fn, so
+// at most one config's content is in memory per call. A config deleted
+// meanwhile is skipped.
+func (s *Service) Each(ctx context.Context, a auth.Actor, fn func(Config) error) error {
+	metas, err := s.DB.ListConfigMeta(ctx, a.UserID)
+	if err != nil {
+		return err
+	}
+	for _, m := range metas {
+		c, err := s.Get(ctx, a, m.ID)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := fn(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) Get(ctx context.Context, a auth.Actor, id int64) (Config, error) {
@@ -329,6 +353,7 @@ func fromRow(c store.Config, content string) Config {
 		UserID:              c.UserID,
 		Name:                c.Name,
 		Content:             content,
+		Size:                len(content),
 		Version:             c.Version,
 		Revision:            c.CurrentRevision,
 		LastUsedWithVersion: c.LastUsedWithVersion,

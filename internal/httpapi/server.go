@@ -91,7 +91,13 @@ func (s *Server) Handler() http.Handler {
 		strip := http.StripPrefix(base, h)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == base {
-				http.Redirect(w, r, base+"/", http.StatusMovedPermanently)
+				target := base + "/"
+				if r.URL.RawQuery != "" {
+					target += "?" + r.URL.RawQuery
+				}
+				// The target starts with the validated base path; a query
+				// after "?" cannot change the host.
+				http.Redirect(w, r, target, http.StatusMovedPermanently) //nolint:gosec // see above
 				return
 			}
 			strip.ServeHTTP(w, r)

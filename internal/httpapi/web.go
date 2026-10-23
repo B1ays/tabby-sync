@@ -156,7 +156,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, sess webSession)
 }
 
 func (s *Server) configsPage(w http.ResponseWriter, r *http.Request, sess webSession) {
-	list, err := s.configs.List(r.Context(), sess.actor())
+	list, err := s.configs.ListMeta(r.Context(), sess.actor())
 	if err != nil {
 		s.webError(w, r, err)
 		return

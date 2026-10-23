@@ -79,17 +79,42 @@ func (s *Server) routesV1(mux *http.ServeMux) {
 	mux.Handle("PATCH /api/1/user", s.authed(auth.ScopeUserWrite, s.updateUser))
 }
 
+// listConfigs returns every config with its content, as Tabby Web does. The
+// array is streamed one config at a time, so memory use is bounded by the
+// largest config rather than their sum.
 func (s *Server) listConfigs(w http.ResponseWriter, r *http.Request, a auth.Actor) {
-	list, err := s.configs.List(r.Context(), a)
-	if err != nil {
+	started := false
+	err := s.configs.Each(r.Context(), a, func(c configs.Config) error {
+		b, err := json.Marshal(toJSON(c))
+		if err != nil {
+			return err
+		}
+		sep := []byte(",")
+		if !started {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			sep = []byte("[")
+			started = true
+		}
+		if _, err := w.Write(sep); err != nil {
+			return err
+		}
+		_, err = w.Write(b)
+		return err
+	})
+	switch {
+	case err != nil && !started:
 		s.writeError(w, r, err)
-		return
+	case err != nil:
+		// The 200 is already sent; cut the connection so the client sees a
+		// broken response rather than a short but valid-looking list.
+		s.log.ErrorContext(r.Context(), "config list aborted", "err", err)
+		panic(http.ErrAbortHandler)
+	case !started:
+		writeJSON(w, http.StatusOK, []configJSON{})
+	default:
+		_, _ = w.Write([]byte("]\n"))
 	}
-	out := make([]configJSON, len(list))
-	for i, c := range list {
-		out[i] = toJSON(c)
-	}
-	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) createConfig(w http.ResponseWriter, r *http.Request, a auth.Actor) {

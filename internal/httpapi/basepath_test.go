@@ -44,6 +44,15 @@ func TestAPIUnderBasePath(t *testing.T) {
 	if res.StatusCode != 301 || res.Header.Get("Location") != base+"/" {
 		t.Errorf("bare prefix: %d %s", res.StatusCode, res.Header.Get("Location"))
 	}
+	// The query string survives the redirect.
+	res, err = c.Get(e.srv.URL + base + "?return_to=%2Fdevices&x=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if loc := res.Header.Get("Location"); loc != base+"/?return_to=%2Fdevices&x=1" {
+		t.Errorf("bare prefix with query: %s", loc)
+	}
 }
 
 func TestWebUnderBasePath(t *testing.T) {

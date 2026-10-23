@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"tabbysync/internal/config"
 )
@@ -105,9 +107,64 @@ func TestKeyedLimiter(t *testing.T) {
 	if !l.Allow("b") {
 		t.Fatal("keys not independent")
 	}
-	l.max = 2
-	if l.Allow("c") {
-		t.Fatal("cap not enforced")
+}
+
+// TestKeyedLimiterFullTable: when the table is full, a new key evicts the
+// least recently used one instead of being refused, and an active key keeps
+// its exhausted bucket.
+func TestKeyedLimiterFullTable(t *testing.T) {
+	l := newKeyedLimiter(0.001, 1)
+	l.max = 3
+	l.Allow("attacker") // exhausts its single token
+	for _, k := range []string{"x1", "x2"} {
+		l.Allow(k)
+	}
+	l.Allow("attacker") // most recently used again
+	for i := range 1000 {
+		key := fmt.Sprintf("flood-%d", i)
+		if !l.Allow(key) {
+			t.Fatalf("new key %s refused at the cap", key)
+		}
+		if i%2 == 0 && l.Allow("attacker") {
+			t.Fatal("an active exhausted key was reset by eviction")
+		}
+	}
+	if len(l.buckets) != 3 || l.lru.Len() != 3 {
+		t.Fatalf("table size %d/%d, want 3", len(l.buckets), l.lru.Len())
+	}
+	if _, ok := l.buckets["x1"]; ok {
+		t.Fatal("least recently used key was not evicted")
+	}
+}
+
+func TestKeyedLimiterSweep(t *testing.T) {
+	l := newKeyedLimiter(1, 1)
+	l.idle = time.Minute
+	l.Allow("old")
+	l.Allow("new")
+	l.buckets["old"].Value.(*bucket).seen = time.Now().Add(-2 * time.Minute)
+	// Keep LRU order consistent with "seen": "old" is the back element.
+	l.Sweep()
+	if _, ok := l.buckets["old"]; ok || l.lru.Len() != 1 {
+		t.Fatalf("sweep left %d buckets", l.lru.Len())
+	}
+	if _, ok := l.buckets["new"]; !ok {
+		t.Fatal("sweep dropped a fresh bucket")
+	}
+}
+
+func TestClientKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"203.0.113.7":             "203.0.113.7",
+		"2001:db8:1:2:aaaa::1":    "2001:db8:1:2::/64",
+		"2001:db8:1:2:ffff:1:2:3": "2001:db8:1:2::/64",
+		"2001:db8:1:3::1":         "2001:db8:1:3::/64",
+		"::ffff:198.51.100.9":     "::ffff:198.51.100.9",
+		"::1":                     "::/64",
+	} {
+		if got := clientKey(netip.MustParseAddr(in)); got != want {
+			t.Errorf("clientKey(%s) = %s, want %s", in, got, want)
+		}
 	}
 }
 
