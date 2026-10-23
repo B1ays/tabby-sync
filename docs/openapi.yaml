@@ -1,0 +1,947 @@
+openapi: 3.1.0
+info:
+  title: tabby-sync API
+  version: 1.0.0
+  summary: Config sync server for the Tabby terminal.
+  description: |
+    Two APIs share the same authentication and data:
+
+    - **API v1** (`/api/1`) is compatible with the Tabby Web sync API used by the
+      desktop Tabby app. `If-Match` is honoured when sent but not required.
+    - **API v2** (`/api/2`) is for clients that handle conflicts: every change needs
+      `If-Match`, content has its own URL with `Repr-Digest`, and modifying requests
+      accept `Idempotency-Key`.
+
+    **Authentication.** Every `/api` request needs `Authorization: Bearer <device token>`.
+    Tokens are issued per device (CLI `syncd token create` or the web UI) and carry
+    scopes: `configs:read`, `configs:write`, `user:read`, `user:write`. The scope an
+    operation needs is given in its description and in `x-required-scope`. Tokens in
+    the URL (`?auth_token=`) are not accepted.
+
+    **Versions.** A config's `ETag` has the form `"v<version>"`; the version grows on
+    every change to the config (content, name or metadata).
+
+    **Errors** are `application/problem+json` (RFC 9457). Every response carries an
+    `X-Request-ID` header; problem bodies repeat it as `request_id`.
+
+    **Rate limits.** Requests are limited per client address (per /64 for IPv6), per
+    failed authentication attempts and per device; exceeding a limit yields `429` with
+    `Retry-After`.
+
+    **Base path.** When the server runs with `TABBYSYNC_BASE_PATH` (e.g.
+    `/services/tabby-sync`), all paths below are relative to that prefix.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: '{scheme}://{host}{basePath}'
+    variables:
+      scheme:
+        default: https
+        enum: [https, http]
+      host:
+        default: sync.example.com
+      basePath:
+        default: ''
+        description: TABBYSYNC_BASE_PATH, for example /services/tabby-sync.
+
+security:
+  - deviceToken: []
+
+tags:
+  - name: v1 configs
+    description: Tabby Web compatible config endpoints.
+  - name: v1 user
+    description: Tabby Web compatible user endpoints.
+  - name: v2 configs
+    description: Config metadata with mandatory optimistic concurrency.
+  - name: v2 content
+    description: Raw config content with digests.
+  - name: v2 history
+    description: Revision history and restore.
+  - name: health
+    description: Liveness and readiness probes.
+
+paths:
+  /api/1/configs:
+    get:
+      tags: [v1 configs]
+      operationId: v1ListConfigs
+      summary: List configs with their content
+      description: |
+        Returns every live config of the user, with content, ordered by ID.
+        Scope: `configs:read`.
+
+        The array is streamed one config at a time. If a config cannot be
+        decrypted midway, the connection is cut, so a client sees a broken
+        response rather than a short list.
+      x-required-scope: configs:read
+      responses:
+        '200':
+          description: The user's configs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/ConfigV1'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    post:
+      tags: [v1 configs]
+      operationId: v1CreateConfig
+      summary: Create a config
+      description: |
+        Creates a config. Without `name` it is called `Unnamed config (YYYY-MM-DD)`;
+        without `content` it is `{}`. Scope: `configs:write`.
+      x-required-scope: configs:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfigV1Write'}
+            example:
+              name: Laptop
+      responses:
+        '201':
+          description: Created.
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+            Location: {$ref: '#/components/headers/Location'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigV1'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/ConfigLimit'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+
+  /api/1/configs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ConfigId'
+    get:
+      tags: [v1 configs]
+      operationId: v1GetConfig
+      summary: Get a config
+      description: 'Scope: `configs:read`.'
+      x-required-scope: configs:read
+      responses:
+        '200':
+          description: The config.
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigV1'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    patch:
+      tags: [v1 configs]
+      operationId: v1PatchConfig
+      summary: Update a config
+      description: |
+        Changes the given fields. A content change creates a new revision; a write
+        whose content equals the current content creates none and keeps
+        `modified_at`. `If-Match` is optional here. Scope: `configs:write`.
+      x-required-scope: configs:write
+      parameters:
+        - $ref: '#/components/parameters/IfMatchOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfigV1Write'}
+            example:
+              content: "version: 3\nprofiles: []\n"
+              last_used_with_version: 1.0.230
+      responses:
+        '200': {$ref: '#/components/responses/ConfigV1Updated'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    put:
+      tags: [v1 configs]
+      operationId: v1PutConfig
+      summary: Update a config (same as PATCH)
+      description: 'Behaves exactly like PATCH: absent fields are kept. Scope: `configs:write`.'
+      x-required-scope: configs:write
+      parameters:
+        - $ref: '#/components/parameters/IfMatchOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfigV1Write'}
+      responses:
+        '200': {$ref: '#/components/responses/ConfigV1Updated'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    delete:
+      tags: [v1 configs]
+      operationId: v1DeleteConfig
+      summary: Delete a config
+      description: |
+        Deletes the config (it is purged permanently after the retention period)
+        and clears it as the active config. Scope: `configs:write`.
+      x-required-scope: configs:write
+      responses:
+        '204':
+          description: Deleted.
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+
+  /api/1/user:
+    get:
+      tags: [v1 user]
+      operationId: v1GetUser
+      summary: Get the current user
+      description: 'Scope: `user:read`.'
+      x-required-scope: user:read
+      responses:
+        '200': {$ref: '#/components/responses/UserV1'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    put:
+      tags: [v1 user]
+      operationId: v1PutUser
+      summary: Set the active config
+      description: |
+        Only `active_config` can be changed; the other user fields are accepted
+        and ignored, so a client may send back the whole object. Scope: `user:write`.
+      x-required-scope: user:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserV1Write'}
+            example:
+              active_config: 1
+      responses:
+        '200': {$ref: '#/components/responses/UserV1'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    patch:
+      tags: [v1 user]
+      operationId: v1PatchUser
+      summary: Set the active config (same as PUT)
+      description: 'Scope: `user:write`.'
+      x-required-scope: user:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserV1Write'}
+      responses:
+        '200': {$ref: '#/components/responses/UserV1'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+
+  /api/2/configs:
+    get:
+      tags: [v2 configs]
+      operationId: v2ListConfigs
+      summary: List config metadata
+      description: |
+        Lists the user's configs without decrypting them, so items have no
+        `content_digest`; get a single config for its digest. Scope: `configs:read`.
+      x-required-scope: configs:read
+      responses:
+        '200':
+          description: Config metadata, ordered by ID.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/ConfigMetaV2'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    post:
+      tags: [v2 configs]
+      operationId: v2CreateConfig
+      summary: Create a config
+      description: |
+        Requires `Idempotency-Key`: a retry with the same key and request returns
+        the original response instead of creating a second config.
+        Scope: `configs:write`.
+      x-required-scope: configs:write
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfigCreateV2'}
+            example:
+              name: Laptop
+              content: "version: 3\nprofiles: []\n"
+      responses:
+        '201':
+          description: Created (or the replay of an earlier creation).
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+            Location: {$ref: '#/components/headers/Location'}
+            Idempotent-Replayed: {$ref: '#/components/headers/IdempotentReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigMetaV2Full'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/ConfigLimit'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/IdempotencyKeyReused'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+
+  /api/2/configs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ConfigId'
+    get:
+      tags: [v2 configs]
+      operationId: v2GetConfig
+      summary: Get config metadata
+      description: 'Includes `content_digest`. Scope: `configs:read`.'
+      x-required-scope: configs:read
+      responses:
+        '200':
+          description: Config metadata.
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigMetaV2Full'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    patch:
+      tags: [v2 configs]
+      operationId: v2PatchConfig
+      summary: Rename or set the Tabby version
+      description: |
+        Changes metadata only; upload content with `PUT .../content`.
+        Scope: `configs:write`.
+      x-required-scope: configs:write
+      parameters:
+        - $ref: '#/components/parameters/IfMatchRequired'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfigPatchV2'}
+            example:
+              name: Work laptop
+      responses:
+        '200': {$ref: '#/components/responses/ConfigV2Updated'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/IdempotencyKeyReused'}
+        '428': {$ref: '#/components/responses/PreconditionRequired'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    delete:
+      tags: [v2 configs]
+      operationId: v2DeleteConfig
+      summary: Delete a config
+      description: 'Scope: `configs:write`.'
+      x-required-scope: configs:write
+      parameters:
+        - $ref: '#/components/parameters/IfMatchRequired'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      responses:
+        '204':
+          description: Deleted (or the replay of an earlier deletion).
+          headers:
+            Idempotent-Replayed: {$ref: '#/components/headers/IdempotentReplayed'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '422': {$ref: '#/components/responses/IdempotencyKeyReused'}
+        '428': {$ref: '#/components/responses/PreconditionRequired'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+
+  /api/2/configs/{id}/content:
+    parameters:
+      - $ref: '#/components/parameters/ConfigId'
+    get:
+      tags: [v2 content]
+      operationId: v2GetContent
+      summary: Download the content
+      description: 'Scope: `configs:read`.'
+      x-required-scope: configs:read
+      parameters:
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: The current content.
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+            Repr-Digest: {$ref: '#/components/headers/ReprDigest'}
+          content:
+            application/yaml:
+              schema: {$ref: '#/components/schemas/Content'}
+        '304':
+          description: Not modified since the given `ETag`.
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    put:
+      tags: [v2 content]
+      operationId: v2PutContent
+      summary: Upload the content
+      description: |
+        Replaces the content; a change creates a new revision. If the request
+        carries `Content-Digest` or `Repr-Digest` (sha-256 or sha-512), the body is
+        checked against it and nothing is written on a mismatch (`400`). Unknown
+        digest algorithms are ignored. `Content-Encoding` other than `identity` is
+        refused (`415`). Scope: `configs:write`.
+      x-required-scope: configs:write
+      parameters:
+        - $ref: '#/components/parameters/IfMatchRequired'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+        - $ref: '#/components/parameters/ContentDigest'
+        - $ref: '#/components/parameters/ReprDigestRequest'
+      requestBody:
+        required: true
+        description: 'The content, at most `TABBYSYNC_MAX_CONFIG_BYTES` (2 MiB by default).'
+        content:
+          application/yaml:
+            schema: {$ref: '#/components/schemas/Content'}
+          application/x-yaml:
+            schema: {$ref: '#/components/schemas/Content'}
+          text/yaml:
+            schema: {$ref: '#/components/schemas/Content'}
+          application/json:
+            schema: {$ref: '#/components/schemas/Content'}
+          text/plain:
+            schema: {$ref: '#/components/schemas/Content'}
+      responses:
+        '200':
+          description: Updated (or the replay of an earlier update).
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+            Repr-Digest: {$ref: '#/components/headers/ReprDigest'}
+            Idempotent-Replayed: {$ref: '#/components/headers/IdempotentReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigMetaV2Full'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '413': {$ref: '#/components/responses/PayloadTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/IdempotencyKeyReused'}
+        '428': {$ref: '#/components/responses/PreconditionRequired'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+
+  /api/2/configs/{id}/revisions:
+    parameters:
+      - $ref: '#/components/parameters/ConfigId'
+    get:
+      tags: [v2 history]
+      operationId: v2ListRevisions
+      summary: List revisions
+      description: 'Newest first. Scope: `configs:read`.'
+      x-required-scope: configs:read
+      responses:
+        '200':
+          description: The config's revisions.
+          headers:
+            ETag: {$ref: '#/components/headers/ETag'}
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/RevisionV2'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+
+  /api/2/configs/{id}/revisions/{rev}/content:
+    parameters:
+      - $ref: '#/components/parameters/ConfigId'
+      - $ref: '#/components/parameters/Revision'
+    get:
+      tags: [v2 history]
+      operationId: v2GetRevisionContent
+      summary: Download a revision's content
+      description: 'A revision never changes, so its `ETag` (`"r<revision>"`) is stable. Scope: `configs:read`.'
+      x-required-scope: configs:read
+      parameters:
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: The revision's content.
+          headers:
+            ETag:
+              description: '`"r<revision>"`.'
+              schema:
+                type: string
+                pattern: '^"r[0-9]+"$'
+            Repr-Digest: {$ref: '#/components/headers/ReprDigest'}
+          content:
+            application/yaml:
+              schema: {$ref: '#/components/schemas/Content'}
+        '304':
+          description: Not modified.
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+
+  /api/2/configs/{id}/revisions/{rev}/restore:
+    parameters:
+      - $ref: '#/components/parameters/ConfigId'
+      - $ref: '#/components/parameters/Revision'
+    post:
+      tags: [v2 history]
+      operationId: v2RestoreRevision
+      summary: Restore a revision
+      description: |
+        Makes the revision's content current by writing it as a new revision; the
+        history in between is kept. The request has no body. Scope: `configs:write`.
+      x-required-scope: configs:write
+      parameters:
+        - $ref: '#/components/parameters/IfMatchRequired'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      responses:
+        '200': {$ref: '#/components/responses/ConfigV2Updated'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '422': {$ref: '#/components/responses/IdempotencyKeyReused'}
+        '428': {$ref: '#/components/responses/PreconditionRequired'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+
+  /healthz:
+    get:
+      tags: [health]
+      operationId: healthz
+      summary: Liveness probe
+      security: []
+      responses:
+        '200':
+          description: The process is running.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, const: ok}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /readyz:
+    get:
+      tags: [health]
+      operationId: readyz
+      summary: Readiness probe
+      description: Checks that the database is reachable.
+      security: []
+      responses:
+        '200':
+          description: Ready to serve.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, const: ready}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '503':
+          description: The database is unavailable.
+          content:
+            application/problem+json:
+              schema: {$ref: '#/components/schemas/Problem'}
+
+components:
+  securitySchemes:
+    deviceToken:
+      type: http
+      scheme: bearer
+      description: |
+        A device token (`tbs_…`, or an imported Tabby Web token). Unknown, expired
+        and revoked tokens, and tokens of disabled users, all get `401` with
+        `WWW-Authenticate: Bearer …, error="invalid_token"`.
+
+  parameters:
+    ConfigId:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, format: int64, minimum: 1}
+    Revision:
+      name: rev
+      in: path
+      required: true
+      schema: {type: integer, format: int32, minimum: 1}
+    IfMatchRequired:
+      name: If-Match
+      in: header
+      required: true
+      description: |
+        The config's current `ETag`. Missing → `428`; `*`, a weak or a malformed tag
+        → `400`; stale → `412`.
+      schema: {$ref: '#/components/schemas/ETag'}
+    IfMatchOptional:
+      name: If-Match
+      in: header
+      required: false
+      description: 'When given, the write applies only if it equals the current `ETag` (else `412`). `*` means no condition.'
+      schema:
+        type: string
+        pattern: '^("v[0-9]+"|\*)$'
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: 'Answer `304` if the current `ETag` is in the list (weak comparison).'
+      schema: {type: string}
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: &idempotency |
+        A structured-field string (`"…"`) or bare token of 1–255 visible ASCII
+        characters, without `"` and `\`. The response is stored for 24 hours with
+        the change; a retry with the same key and request replays it with
+        `Idempotent-Replayed: true`, and the same key with a different request
+        gets `422`. Client errors are stored too, server errors are not. Keys are
+        scoped per user.
+      schema: {$ref: '#/components/schemas/IdempotencyKey'}
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: *idempotency
+      schema: {$ref: '#/components/schemas/IdempotencyKey'}
+    ContentDigest:
+      name: Content-Digest
+      in: header
+      required: false
+      description: 'RFC 9530 digest of the body, e.g. `sha-256=:<base64>:`; checked if present.'
+      schema: {$ref: '#/components/schemas/Digest'}
+    ReprDigestRequest:
+      name: Repr-Digest
+      in: header
+      required: false
+      description: 'Same as `Content-Digest` (content codings are not supported).'
+      schema: {$ref: '#/components/schemas/Digest'}
+
+  headers:
+    ETag:
+      description: 'The config version, `"v<version>"`.'
+      schema: {$ref: '#/components/schemas/ETag'}
+    Location:
+      description: URL path of the created config, including the base path.
+      schema: {type: string}
+    ReprDigest:
+      description: 'SHA-256 of the content (RFC 9530), `sha-256=:<base64>:`.'
+      schema: {$ref: '#/components/schemas/Digest'}
+    IdempotentReplayed:
+      description: '`true` when the response is a replay of an earlier request with the same `Idempotency-Key`.'
+      schema: {type: string, const: 'true'}
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: {type: integer}
+    WWWAuthenticate:
+      description: 'Bearer challenge, e.g. `Bearer realm="tabby-sync", error="invalid_token"`.'
+      schema: {type: string}
+
+  schemas:
+    ETag:
+      type: string
+      pattern: '^"v[0-9]+"$'
+      examples: ['"v3"']
+    Digest:
+      type: string
+      examples: ['sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:']
+    IdempotencyKey:
+      type: string
+      examples: ['"3f1c2a9e-7b1d-4c55-9e0e-2a6f2d1b9c41"']
+    Content:
+      type: string
+      description: |
+        A Tabby config: one YAML (or JSON) document whose top level is a mapping,
+        valid UTF-8 without NUL bytes, at most `TABBYSYNC_MAX_CONFIG_BYTES`.
+      examples: ["version: 3\nprofiles: []\n"]
+    ConfigName:
+      type: string
+      minLength: 1
+      maxLength: 255
+      description: 1–255 characters, no control characters.
+    AppVersion:
+      type: [string, 'null']
+      maxLength: 32
+      pattern: '^[\x20-\x7E]*$'
+      description: Tabby version that last wrote the config; printable ASCII.
+
+    ConfigV1:
+      type: object
+      required: [id, user, name, content, last_used_with_version, created_at, modified_at]
+      properties:
+        id: {type: integer, format: int64}
+        user: {type: integer, format: int64, description: Owner's user ID.}
+        name: {$ref: '#/components/schemas/ConfigName'}
+        content: {$ref: '#/components/schemas/Content'}
+        last_used_with_version: {$ref: '#/components/schemas/AppVersion'}
+        created_at:
+          type: string
+          format: date-time
+          description: UTC with microseconds, e.g. `2026-10-23T07:00:37.662731Z`.
+        modified_at:
+          type: string
+          format: date-time
+          description: Moves only when the name or content changes; clients poll it to decide whether to download.
+    ConfigV1Write:
+      type: object
+      additionalProperties: false
+      description: |
+        Writable fields. `id`, `user`, `created_at` and `modified_at` are accepted
+        and ignored, so a client may send back a whole config; any other field is
+        an error.
+      properties:
+        name: {$ref: '#/components/schemas/ConfigName'}
+        content: {$ref: '#/components/schemas/Content'}
+        last_used_with_version: {$ref: '#/components/schemas/AppVersion'}
+        id: {description: Ignored.}
+        user: {description: Ignored.}
+        created_at: {description: Ignored.}
+        modified_at: {description: Ignored.}
+
+    UserV1:
+      type: object
+      required: [id, username, active_config, custom_connection_gateway, custom_connection_gateway_token,
+                 config_sync_token, is_pro, is_sponsor, github_username]
+      description: |
+        Shaped like Tabby Web's user object. Fields Tabby Web uses for its own
+        features have fixed values here.
+      properties:
+        id: {type: integer, format: int64}
+        username: {type: string}
+        active_config:
+          type: [integer, 'null']
+          format: int64
+        custom_connection_gateway: {type: 'null'}
+        custom_connection_gateway_token: {type: 'null'}
+        config_sync_token:
+          type: 'null'
+          description: Always null; only token hashes are stored. Tokens are issued per device.
+        is_pro: {type: boolean, const: true}
+        is_sponsor: {type: boolean, const: false}
+        github_username: {type: 'null'}
+    UserV1Write:
+      type: object
+      additionalProperties: false
+      description: |
+        Only `active_config` is applied (a live config of the user, or null). The
+        other user fields are accepted and ignored; any unknown field is an error.
+      properties:
+        active_config:
+          type: [integer, 'null']
+          format: int64
+        id: {description: Ignored.}
+        username: {description: Ignored.}
+        custom_connection_gateway: {description: Ignored.}
+        custom_connection_gateway_token: {description: Ignored.}
+        config_sync_token: {description: Ignored.}
+        is_pro: {description: Ignored.}
+        is_sponsor: {description: Ignored.}
+        github_username: {description: Ignored.}
+
+    ConfigMetaV2:
+      type: object
+      required: [id, name, version, revision, size, last_used_with_version, created_at, modified_at]
+      properties:
+        id: {type: integer, format: int64}
+        name: {$ref: '#/components/schemas/ConfigName'}
+        version: {type: integer, format: int64, description: 'Grows on every change; the `ETag` is `"v<version>"`.'}
+        revision: {type: integer, format: int32, description: Current revision number.}
+        size: {type: integer, description: Content size in bytes.}
+        content_digest:
+          $ref: '#/components/schemas/Digest'
+          description: 'SHA-256 of the content (RFC 9530 form). Present except in listings.'
+        last_used_with_version: {$ref: '#/components/schemas/AppVersion'}
+        created_at: {type: string, format: date-time}
+        modified_at: {type: string, format: date-time}
+    ConfigMetaV2Full:
+      description: Config metadata including the content digest.
+      allOf:
+        - $ref: '#/components/schemas/ConfigMetaV2'
+        - type: object
+          required: [content_digest]
+    ConfigCreateV2:
+      type: object
+      additionalProperties: false
+      properties:
+        name: {$ref: '#/components/schemas/ConfigName'}
+        content: {$ref: '#/components/schemas/Content'}
+        last_used_with_version: {$ref: '#/components/schemas/AppVersion'}
+    ConfigPatchV2:
+      type: object
+      additionalProperties: false
+      properties:
+        name: {$ref: '#/components/schemas/ConfigName'}
+        last_used_with_version: {$ref: '#/components/schemas/AppVersion'}
+    RevisionV2:
+      type: object
+      required: [revision, size, created_at, device_name, current]
+      properties:
+        revision: {type: integer, format: int32}
+        size: {type: integer, description: Content size in bytes.}
+        created_at: {type: string, format: date-time}
+        device_name:
+          type: [string, 'null']
+          description: Device that wrote the revision; null for web changes and deleted devices.
+        current: {type: boolean}
+
+    Problem:
+      type: object
+      description: RFC 9457 problem details.
+      required: [title, status]
+      properties:
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        errors:
+          type: object
+          additionalProperties: {type: string}
+          description: Field-level validation errors, field name → reason.
+        request_id: {type: string, description: Same as the X-Request-ID response header.}
+
+  responses:
+    ConfigV1Updated:
+      description: Updated (or unchanged, if the request changed nothing).
+      headers:
+        ETag: {$ref: '#/components/headers/ETag'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ConfigV1'}
+    ConfigV2Updated:
+      description: Updated (or the replay of an earlier update).
+      headers:
+        ETag: {$ref: '#/components/headers/ETag'}
+        Idempotent-Replayed: {$ref: '#/components/headers/IdempotentReplayed'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ConfigMetaV2Full'}
+    UserV1:
+      description: The current user.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/UserV1'}
+    BadRequest:
+      description: |
+        Malformed JSON, unknown or null fields, invalid values (with `errors`), a
+        malformed `If-Match` or `Idempotency-Key`, or a digest mismatch.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+          example:
+            title: Bad Request
+            status: 400
+            detail: 'content: must be a mapping at the top level'
+            errors: {content: must be a mapping at the top level}
+            request_id: 3f6c0d2a9b1e4c7d8e9f0a1b
+    Unauthorized:
+      description: Missing, unknown, expired or revoked token.
+      headers:
+        WWW-Authenticate: {$ref: '#/components/headers/WWWAuthenticate'}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    Forbidden:
+      description: 'The token lacks the required scope (`WWW-Authenticate: Bearer error="insufficient_scope"`).'
+      headers:
+        WWW-Authenticate: {$ref: '#/components/headers/WWWAuthenticate'}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    NotFound:
+      description: No such config or revision for this user. Other users' objects are reported as not found.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    ConfigLimit:
+      description: The user already has `TABBYSYNC_MAX_CONFIGS_PER_USER` configs.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    PreconditionFailed:
+      description: '`If-Match` is stale. The `ETag` header carries the current version.'
+      headers:
+        ETag: {$ref: '#/components/headers/ETag'}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    PreconditionRequired:
+      description: '`If-Match` is missing; read the config first.'
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    PayloadTooLarge:
+      description: The request body exceeds the limit.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    UnsupportedMediaType:
+      description: Wrong `Content-Type`, or a `Content-Encoding` other than identity.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    IdempotencyKeyReused:
+      description: The `Idempotency-Key` was already used for a different request.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After: {$ref: '#/components/headers/RetryAfter'}
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}

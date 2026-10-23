@@ -157,6 +157,12 @@ Token scopes: `configs:read`, `configs:write`, `user:read`, `user:write`. By def
 
 ## API
 
+The full reference is the OpenAPI 3.1 document [`docs/openapi.yaml`](docs/openapi.yaml): schemas, headers, status codes and examples for every operation. A test checks it against the server's routes and responses. To render it as a single HTML page:
+
+```bash
+npx @redocly/cli build-docs docs/openapi.yaml -o openapi.html
+```
+
 ### API v1 — Tabby Web compatible
 
 | Request | Purpose |

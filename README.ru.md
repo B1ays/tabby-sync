@@ -157,6 +157,12 @@ syncd health                                 проверка готовност
 
 ## API
 
+Полный справочник — документ OpenAPI 3.1 [`docs/openapi.yaml`](docs/openapi.yaml): схемы, заголовки, коды ответов и примеры для каждой операции. Тест сверяет его с маршрутами и ответами сервера. Собрать из него HTML-страницу:
+
+```bash
+npx @redocly/cli build-docs docs/openapi.yaml -o openapi.html
+```
+
 ### API v1 — совместимость с Tabby Web
 
 | Запрос | Назначение |
