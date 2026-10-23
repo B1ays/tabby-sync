@@ -35,6 +35,8 @@ const usage = `usage: syncd <command> [args]
   serve                                   run the HTTP server
   migrate up|down|status|version          manage the database schema
   user add <name> [-email addr]           add a user (email links the first web login)
+  user set-email <name> <addr|->         set (or with "-" clear) the email that
+                                          links the user's first web login
   user list|disable|enable [name]         manage users
   token create -user U -name N [-scopes S] [-ttl D]
                                           issue a device token (shown once)
@@ -195,12 +197,11 @@ func userCmd(ctx context.Context, db *store.Store, args []string) error {
 		if args[0] == "add" {
 			var em *string
 			if *email != "" {
-				a, err := mail.ParseAddress(*email)
-				if err != nil || a.Address != *email {
-					return fmt.Errorf("invalid email %q", *email)
+				e, err := parseEmail(*email)
+				if err != nil {
+					return err
 				}
-				lower := strings.ToLower(*email)
-				em = &lower
+				em = &e
 			}
 			u, err := db.CreateUserWithEmail(ctx, name, em)
 			if store.IsUniqueViolation(err) {
@@ -216,8 +217,54 @@ func userCmd(ctx context.Context, db *store.Store, args []string) error {
 			return userErr(name, err)
 		}
 		return db.SetUserDisabled(ctx, u.ID, args[0] == "disable")
+	case "set-email":
+		if len(args) != 3 {
+			return errors.New(`usage: syncd user set-email <name> <addr|->`)
+		}
+		u, err := db.GetUserByUsername(ctx, args[1])
+		if err != nil {
+			return userErr(args[1], err)
+		}
+		var em *string
+		if args[2] != "-" {
+			e, err := parseEmail(args[2])
+			if err != nil {
+				return err
+			}
+			em = &e
+		}
+		err = db.SetUserEmail(ctx, u.ID, em)
+		if store.IsUniqueViolation(err) {
+			return fmt.Errorf("email %s already belongs to another user", *em)
+		}
+		if err != nil {
+			return err
+		}
+		switch {
+		case em == nil:
+			fmt.Printf("cleared the email of %q\n", u.Username)
+		case u.HasIdentity:
+			// Linking by email happens only once; afterwards the login is
+			// identified by the provider's subject, not the email.
+			fmt.Printf("set the email of %q to %s; note: the user already has a web login, which stays as it is\n",
+				u.Username, *em)
+		default:
+			fmt.Printf("set the email of %q to %s; the first web login with this verified email will be linked\n",
+				u.Username, *em)
+		}
+		return nil
 	}
 	return fmt.Errorf("unknown user command %q", args[0])
+}
+
+// parseEmail accepts a bare address and returns it in lower case, the form
+// the users_email_lower index and login linking compare.
+func parseEmail(s string) (string, error) {
+	a, err := mail.ParseAddress(s)
+	if err != nil || a.Address != s {
+		return "", fmt.Errorf("invalid email %q", s)
+	}
+	return strings.ToLower(s), nil
 }
 
 func tokenCmd(ctx context.Context, db *store.Store, args []string) error {

@@ -159,6 +159,7 @@ sudo docker compose run --rm --no-deps syncd verify
 syncd serve
 syncd migrate up|down|status|version
 syncd user add <name> [-email addr]
+syncd user set-email <name> <addr|->           # email для привязки первого входа через веб; "-" очищает
 syncd user list|disable|enable <name>
 syncd token create -user U -name N [-scopes configs:read,configs:write,user:read] [-ttl 8760h]
 syncd token import-legacy -user U -name N      # токен Tabby Web со stdin
