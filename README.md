@@ -1,281 +1,365 @@
 # tabby-sync
 
-Сервер синхронизации конфигов для настольного [Tabby](https://github.com/Eugeny/tabby). Совместим с API `/api/1` из Tabby Web, поэтому клиент работает без изменений: в настройках Tabby → Config sync укажите адрес сервера (`https://…`) и токен устройства.
+Самостоятельно размещаемый сервер синхронизации конфигураций для терминала [Tabby](https://github.com/Eugeny/tabby).
 
-Готовы этапы 1–7 плана: каркас, хранилище с ревизиями, шифрование, токены устройств, совместимый API v1, веб-интерфейс со входом через OIDC и строгий API v2 для своих клиентов. Аудита и метрик пока нет.
+Сервер совместим с API синхронизации Tabby Web (`/api/1`), поэтому настольный Tabby подключается к нему без доработок. Конфиги шифруются на сервере, у каждого устройства свой токен, изменения сохраняются в истории, а одновременные правки с разных устройств не теряются.
 
-## Чем отличается от Tabby Web
+## Возможности
+
+- **Совместимость с Tabby.** Настольный клиент синхронизируется через стандартный раздел *Settings → Config sync*.
+- **Шифрование хранимых данных.** Каждая ревизия шифруется AES-256-GCM собственным ключом данных; ключи данных обёрнуты мастер-ключом (envelope encryption). Шифртекст привязан к пользователю, конфигу и ревизии, поэтому подмена строк в базе обнаруживается при расшифровке.
+- **История и откат.** Каждое изменение содержимого — новая неизменяемая ревизия. Любую ревизию можно посмотреть и восстановить через веб или API.
+- **Ничего не теряется при одновременной записи.** Записи в один конфиг упорядочиваются блокировкой строки. API v2 требует `If-Match` и отвечает `412`, если конфиг уже изменили.
+- **Токены устройств.** У каждого устройства свой токен с правами и сроком действия; токен можно отозвать в любой момент. В базе хранится только SHA-256 токена.
+- **Веб-интерфейс.** Вход через любой OpenID Connect-провайдер; управление устройствами и сессиями; просмотр и восстановление истории.
+- **API v2** для собственных клиентов: обязательный `If-Match`, `Idempotency-Key`, `Repr-Digest`/`Content-Digest` (RFC 9530).
+- **Готовое развёртывание.** Docker Compose с PostgreSQL и Caddy (автоматический TLS); ежедневные бэкапы с проверкой восстановления; отдельные роли базы данных; лимиты ресурсов и healthcheck.
+
+### Отличия от Tabby Web
 
 | | Tabby Web | tabby-sync |
 |---|---|---|
-| Хранение | открытый текст | AES-256-GCM, отдельный ключ на каждую ревизию, ключи обёрнуты KEK (envelope) |
-| Привязка шифртекста | — | AAD = пользователь, конфиг, ревизия: перенос строки в БД обнаруживается при расшифровке |
-| Конкурентные записи | последняя затирает | блокировка строки, каждая запись — новая ревизия; `If-Match` даёт `412` |
-| История | нет | ревизии хранятся по политике `REVISIONS_*`; строки неизменяемы (триггер) |
-| Токен | один на пользователя, хранится открыто, есть `?auth_token=` | по токену на устройство, хранится только SHA-256, права, срок, отзыв; только заголовок |
-| Права БД | — | миграции под владельцем схемы, сервер — только DML |
-| Веб-вход | OAuth через social_django | OIDC Authorization Code + PKCE (S256), `state` и `nonce`, одноразовый поток, привязанный к cookie браузера |
-| Сессии | Django | серверные: в cookie `__Host-` только случайный ID, в БД его SHA-256; 30 мин бездействия / 12 ч максимум; новый ID при каждом входе |
-| CSRF | Django | `http.CrossOriginProtection` (Sec-Fetch-Site / Origin) + токен формы, выведенный из секрета сессии |
+| Хранение конфигов | открытым текстом | AES-256-GCM, envelope encryption, привязка к владельцу и ревизии |
+| Одновременные правки | последняя запись затирает остальные | каждая запись — ревизия; `If-Match` → `412` |
+| История | нет | ревизии с политикой хранения и откатом |
+| Токен синхронизации | один на пользователя, хранится открыто, допускается в URL | по токену на устройство, хранится хеш, права, срок, отзыв; только в заголовке |
+| Веб-вход | OAuth через social_django | OIDC Authorization Code + PKCE, `state`, `nonce` |
+| Сессии и CSRF | Django | серверные сессии в cookie `__Host-`; проверка `Sec-Fetch-Site`/`Origin` и токен формы |
+| Права в базе | одна роль | миграции под владельцем схемы, сервер — только чтение и запись строк |
 
-Неизменный `content` не создаёт ревизию и не сдвигает `modified_at`, чтобы другие устройства не перекачивали конфиг впустую.
+## Быстрый старт
 
-## API v2
+Нужны Linux-сервер с Docker Engine и плагином Compose v2, cron, а также домен, DNS-запись которого указывает на сервер. Порты 80 и 443 должны быть открыты: Caddy получит сертификат Let's Encrypt.
 
-Для собственных клиентов, которые умеют обрабатывать конфликты. Аутентификация та же: `Authorization: Bearer <токен устройства>`.
+```bash
+git clone <url-репозитория> /opt/tabby-sync
+```
+
+```bash
+cd /opt/tabby-sync/deploy && sudo ./setup.sh sync.example.com
+```
+
+```bash
+cd /opt/tabby-sync/deploy && sudo docker compose up -d --wait
+```
+
+`setup.sh` создаёт пароли базы, мастер-ключ (`secrets/keyring`) и `.env`, собирает образ и устанавливает задачи cron для бэкапов и очистки. Повторный запуск ничего не перезаписывает.
+
+Создайте пользователя и токен для первого устройства:
+
+```bash
+cd /opt/tabby-sync/deploy && sudo docker compose run --rm syncd user add alice
+```
+
+```bash
+cd /opt/tabby-sync/deploy && sudo docker compose run --rm syncd token create -user alice -name laptop
+```
+
+Токен показывается один раз. В Tabby откройте *Settings → Config sync*, укажите адрес `https://sync.example.com` и токен.
+
+> **Сразу сохраните `secrets/keyring` и `.env` в надёжном месте отдельно от бэкапов.** Без мастер-ключа данные невозможно расшифровать, а ключ, лежащий рядом с бэкапами, делает шифрование бесполезным.
+
+## Варианты развёртывания
+
+### За существующим nginx
+
+Если на сервере уже работает nginx с TLS, встроенный Caddy не нужен. Перед `docker compose up` подключите override-файл:
+
+```bash
+cd /opt/tabby-sync/deploy && sudo cp nginx/compose.override.yaml compose.override.yaml
+```
+
+Он отключает Caddy, публикует сервер только на `127.0.0.1:8080` и доверяет `X-Forwarded-For` только шлюзу Docker-сети, через которую приходит nginx. Compose загружает этот файл автоматически, поэтому его учитывают и скрипты бэкапа, и cron.
+
+Затем добавьте сайт из [`deploy/nginx/tabby-sync.conf`](deploy/nginx/tabby-sync.conf), заменив домен и пути к сертификату. Важные настройки в нём:
+
+- `client_max_body_size 8m` — с ограничением nginx по умолчанию (1 МБ) большие конфиги получат `413`;
+- `proxy_set_header X-Forwarded-For $remote_addr` — заголовок перезаписывается, клиент не может подставить свой адрес;
+- `proxy_set_header Host $host` — по нему CSRF-защита сверяет `Origin`;
+- HSTS и CSP выставляет само приложение, дублировать их в nginx не нужно.
+
+### Под путём на общем домене
+
+Сервис можно разместить рядом с другими приложениями, например на `https://example.com/services/tabby-sync/`. Добавьте в `deploy/.env`:
+
+```
+TABBYSYNC_BASE_PATH=/services/tabby-sync
+```
+
+и вставьте в существующий блок `server { ... }` nginx фрагмент из [`deploy/nginx/tabby-sync-location.conf`](deploy/nginx/tabby-sync-location.conf). В этом режиме:
+
+- сервер сам снимает префикс и отвечает `404` на всё вне его; ссылки, редиректы и заголовки `Location` содержат префикс;
+- cookie ограничены путём `<префикс>/` и используют приставку `__Secure-` (приставка `__Host-` требует `Path=/`), поэтому другие приложения на том же домене их не получают;
+- HSTS не отправляется: политикой домена управляет его nginx;
+- в Tabby адрес сервера указывается с префиксом: `https://example.com/services/tabby-sync`.
+
+В режиме с префиксом cookie можно подставить с соседних поддоменов того же домена. Если поддомены обслуживают недоверенные приложения, разместите сервис на собственном поддомене.
+
+### Без обратного прокси
+
+Сервер может сам принимать TLS: задайте `TABBYSYNC_TLS_CERT_FILE`, `TABBYSYNC_TLS_KEY_FILE` и `TABBYSYNC_LISTEN`.
+
+## Вход через веб (OIDC)
+
+Веб-интерфейс работает с любым провайдером OpenID Connect: Google, Microsoft Entra ID, GitLab, Keycloak, Authentik, Auth0 и другими. GitHub не поддерживает OIDC для входа пользователей и не подходит.
+
+1. Зарегистрируйте у провайдера веб-приложение с redirect URI `https://<домен>[<префикс>]/auth/<id>/callback`, например `https://sync.example.com/auth/google/callback`.
+2. Сохраните client secret в файл, который будет виден в контейнере как `/run/oidc/<id>`:
+   ```bash
+   cd /opt/tabby-sync/deploy && sudo sh -c 'umask 077; cat > secrets/oidc/google && chown 65532:65532 secrets/oidc/google'
+   ```
+3. Добавьте настройки в `deploy/.env`:
+   ```
+   TABBYSYNC_OIDC_PROVIDERS=google
+   TABBYSYNC_OIDC_GOOGLE_NAME=Google
+   TABBYSYNC_OIDC_GOOGLE_ISSUER=https://accounts.google.com
+   TABBYSYNC_OIDC_GOOGLE_CLIENT_ID=<client-id>.apps.googleusercontent.com
+   TABBYSYNC_OIDC_GOOGLE_CLIENT_SECRET_FILE=/run/oidc/google
+   ```
+4. Перезапустите сервер:
+   ```bash
+   cd /opt/tabby-sync/deploy && sudo docker compose up -d --wait syncd
+   ```
+
+**Кто может войти.** Пользователь определяется парой «издатель + идентификатор у провайдера», а не адресом почты. Почта используется только при первом входе и только если провайдер подтвердил её (`email_verified`):
+
+- если администратор заранее указал этот адрес пользователю (`syncd user add alice -email alice@example.com` или `syncd user set-email alice alice@example.com`), вход привязывается к этому пользователю;
+- иначе новый пользователь создаётся, только если адрес указан в `TABBYSYNC_ALLOWED_EMAILS` или его домен — в `TABBYSYNC_ALLOWED_EMAIL_DOMAINS`;
+- в остальных случаях вход отклоняется.
+
+Чтобы выпустить токен устройства через веб, нужен недавний вход (по умолчанию не старше 15 минут). Повторный вход запрашивается с `max_age=0`, и провайдер должен подтвердить его свежим `auth_time`; уже открытая сессия у провайдера не засчитывается.
+
+## Управление
+
+Команды выполняются в каталоге `deploy/` в виде `sudo docker compose run --rm syncd <команда>`.
+
+```
+syncd user add <name> [-email addr]          создать пользователя
+syncd user set-email <name> <addr|->         задать или очистить ("-") email для привязки первого входа через веб
+syncd user list                              список пользователей
+syncd user disable|enable <name>             отключить или включить; отключение сразу аннулирует все токены и сессии
+syncd token create -user U -name N [-scopes S] [-ttl D]
+                                             выпустить токен устройства (показывается один раз)
+syncd token import-legacy -user U -name N    импортировать токен Tabby Web (читается из stdin)
+syncd token list -user U                     список устройств пользователя
+syncd token revoke -user U (-id ID | -all)   отозвать токен(ы)
+syncd keys generate -id ID                   сгенерировать строку для keyring
+syncd keys rewrap                            переобернуть ключи данных под основной мастер-ключ
+syncd purge                                  удалить устаревшие данные (запускается cron)
+syncd verify [-database NAME]                расшифровать все ревизии и проверить целостность
+syncd migrate up|down|status|version         управление схемой базы
+syncd health                                 проверка готовности (используется healthcheck)
+```
+
+Права токена: `configs:read`, `configs:write`, `user:read`, `user:write`. По умолчанию токен получает права `configs:read,configs:write,user:read` и срок 1 год; `-ttl 0` выпускает бессрочный токен.
+
+## API
+
+### API v1 — совместимость с Tabby Web
 
 | Запрос | Назначение |
 |---|---|
-| `GET /api/2/configs` | список: id, name, version, revision, size, даты (без расшифровки, поэтому без `content_digest`) |
-| `POST /api/2/configs` | создать (`{"name","content"}`); **`Idempotency-Key` обязателен** |
-| `GET /api/2/configs/{id}` | метаданные, `ETag` |
-| `PATCH /api/2/configs/{id}` | `{"name","last_used_with_version"}`; **`If-Match` обязателен** |
-| `DELETE /api/2/configs/{id}` | **`If-Match` обязателен** |
-| `GET /api/2/configs/{id}/content` | содержимое как `application/yaml`, `Repr-Digest`, `If-None-Match` → `304` |
-| `PUT /api/2/configs/{id}/content` | загрузить содержимое; **`If-Match` обязателен**, `Content-Digest` проверяется |
-| `GET /api/2/configs/{id}/revisions` | история, новые сверху |
-| `GET /api/2/configs/{id}/revisions/{rev}/content` | содержимое ревизии, `Repr-Digest` |
-| `POST /api/2/configs/{id}/revisions/{rev}/restore` | сделать ревизию текущей (новой ревизией); **`If-Match` обязателен** |
+| `GET /api/1/configs` | список конфигов с содержимым |
+| `POST /api/1/configs` | создать конфиг |
+| `GET /api/1/configs/{id}` | получить конфиг |
+| `PATCH`, `PUT /api/1/configs/{id}` | изменить имя, содержимое, версию Tabby |
+| `DELETE /api/1/configs/{id}` | удалить конфиг |
+| `GET`, `PUT`, `PATCH /api/1/user` | профиль и активный конфиг |
 
-- **Конкурентность.** `ETag` вида `"v12"` меняется при любом изменении конфига. Без `If-Match` изменение отклоняется с `428`, с устаревшим — `412` и текущим `ETag` в ответе; `If-Match: *` не принимается.
-- **Целостность.** `Repr-Digest: sha-256=:…:` (RFC 9530) — SHA-256 содержимого; тот же дайджест в поле `content_digest`. Клиент может прислать `Content-Digest` или `Repr-Digest` (sha-256 / sha-512) с загрузкой — при несовпадении `400`, ничего не записывается. `Content-Encoding` не поддерживается (`415`).
-- **Идемпотентность.** `Idempotency-Key: "…"` (1–255 видимых ASCII) принимается всеми изменяющими запросами, для `POST` обязателен. Ответ сохраняется 24 ч вместе с изменением, в одной транзакции. Повтор возвращает тот же ответ с `Idempotent-Replayed: true` (в том числе после потерянного ответа на `PUT`, который иначе получил бы `412`); тот же ключ с другим запросом — `422`. Ответы с ошибкой клиента (4xx) тоже запоминаются, ошибки сервера (5xx) — нет, такой запрос можно повторить. Ключи у каждого пользователя свои.
+Аутентификация — `Authorization: Bearer <токен устройства>`; передача токена в URL (`?auth_token=`) не поддерживается. Ответы содержат `ETag`, запись учитывает `If-Match`, если клиент его передаёт. Запись с неизменённым содержимым не создаёт ревизию и не меняет `modified_at`, поэтому другие устройства не скачивают конфиг повторно.
 
-## Развёртывание (VPS с Docker)
+### API v2
 
-Нужны Linux, Docker с плагином compose и cron. `setup.sh` создаёт секреты и ключ, собирает образ и ставит задачи в `/etc/cron.d/tabby-sync`; повторный запуск ничего не перезаписывает.
+API для клиентов, которые умеют обрабатывать конфликты. Аутентификация та же.
+
+| Запрос | Назначение |
+|---|---|
+| `GET /api/2/configs` | список метаданных: id, name, version, revision, size, даты |
+| `POST /api/2/configs` | создать конфиг (`{"name", "content"}`); требует `Idempotency-Key` |
+| `GET /api/2/configs/{id}` | метаданные с `content_digest` и `ETag` |
+| `PATCH /api/2/configs/{id}` | изменить `name`, `last_used_with_version`; требует `If-Match` |
+| `DELETE /api/2/configs/{id}` | удалить; требует `If-Match` |
+| `GET /api/2/configs/{id}/content` | содержимое (`application/yaml`) с `Repr-Digest`; `If-None-Match` → `304` |
+| `PUT /api/2/configs/{id}/content` | загрузить содержимое; требует `If-Match` |
+| `GET /api/2/configs/{id}/revisions` | история ревизий, новые сверху |
+| `GET /api/2/configs/{id}/revisions/{rev}/content` | содержимое ревизии с `Repr-Digest` |
+| `POST /api/2/configs/{id}/revisions/{rev}/restore` | сделать ревизию текущей; требует `If-Match` |
+
+- **Конкурентность.** `ETag` вида `"v12"` меняется при любом изменении конфига. Изменение без `If-Match` отклоняется с `428`, с устаревшим значением — с `412` и текущим `ETag`. `If-Match: *` не принимается.
+- **Целостность.** `Repr-Digest: sha-256=:…:` — SHA-256 содержимого. Клиент может передать `Content-Digest` или `Repr-Digest` (sha-256 или sha-512) при загрузке; при несовпадении сервер отвечает `400` и ничего не записывает.
+- **Идемпотентность.** `Idempotency-Key: "…"` (1–255 видимых символов ASCII) принимается всеми изменяющими запросами и обязателен для `POST`. Ответ сохраняется на 24 часа в той же транзакции, что и изменение. Повтор запроса возвращает сохранённый ответ с заголовком `Idempotent-Replayed: true`; тот же ключ с другим запросом — `422`. Ответы с ошибкой клиента (4xx) сохраняются, ошибки сервера (5xx) — нет, такой запрос можно повторить. Ключи у каждого пользователя свои.
+
+Ошибки возвращаются в формате `application/problem+json` (RFC 9457).
+
+## Безопасность
+
+**Что синхронизируется.** Tabby отправляет свой `config.yaml` целиком, кроме раздела настроек самой синхронизации: профили подключений (хосты, порты, имена пользователей, пути к ключам), настройки терминала, а также — по выбору в настройках Tabby — горячие клавиши, внешний вид и хранилище секретов (vault). Пароли, сохранённые в системном хранилище ОС, и сами файлы ключей не передаются.
+
+**Что защищает шифрование.** Содержимое конфигов зашифровано, а мастер-ключ хранится отдельно от базы (`secrets/keyring`). Утечка дампа базы, бэкапа или диска без ключа не раскрывает содержимое. Доступ к работающему серверу (root) даёт доступ и к ключу. Чтобы секреты не были доступны даже серверу, включите в Tabby хранилище секретов (vault) или шифрование всей конфигурации: тогда на сервер попадают только данные, зашифрованные вашей мастер-фразой.
+
+**Метаданные** — имена конфигов, время изменений, размеры ревизий, сведения об устройствах — хранятся открыто.
+
+**Прочие меры:**
+- токены и идентификаторы сессий хранятся только в виде SHA-256;
+- ограничение частоты запросов по адресу клиента (IPv6 — по сети /64), по неудачным попыткам аутентификации и по устройству;
+- строгие заголовки безопасности (CSP, HSTS, `X-Content-Type-Options`, `Referrer-Policy`), `Cache-Control: no-store`;
+- контейнер сервера (distroless) работает без root, с файловой системой только для чтения и без capabilities; база доступна только во внутренней сети Docker; сервер подключается к ней ролью, которой разрешены только чтение и запись строк;
+- сервер не запускается, если файл keyring доступен кому-либо, кроме владельца.
+
+## Эксплуатация
+
+### Бэкапы
+
+Каждый день в 03:15 cron запускает `deploy/backup.sh`. Он:
+
+1. снимает дамп базы и ролей в `deploy/backups/`;
+2. восстанавливает дамп во временную базу и сверяет версию схемы;
+3. расшифровывает каждую ревизию восстановленной копии текущим ключом (`syncd verify`);
+4. только после успешных проверок даёт дампу имя `tabbysync-<время>.dump`, создаёт файл `.sha256` и записывает время в `backups/LAST_SUCCESS`. Дамп, не прошедший проверку, остаётся с расширением `.unverified`.
+
+Дампы хранятся 14 дней (`TABBYSYNC_BACKUP_KEEP_DAYS`), но всегда остаются хотя бы 7 последних подтверждённых (`TABBYSYNC_BACKUP_KEEP_MIN`). Эти переменные читает `backup.sh`; задать их можно в `/etc/cron.d/tabby-sync`. Журнал — в syslog: `journalctl -t tabby-sync-backup`.
+
+Бэкап и восстановление используют общую блокировку: если одна операция уже выполняется, вторая сразу завершается с сообщением.
+
+Рекомендуется:
+- следить за возрастом `backups/LAST_SUCCESS` — если файлу больше суток, бэкап не работает;
+- копировать `backups/` за пределы сервера (restic, rclone, borg);
+- хранить `secrets/keyring` и `.env` отдельно от дампов.
+
+### Восстановление
 
 ```bash
-cd deploy
-sudo ./setup.sh sync.example.com
+cd /opt/tabby-sync/deploy && sudo ./restore.sh backups/tabbysync-<время>.dump
 ```
 
-```bash
-sudo docker compose up -d --wait
-```
+Скрипт останавливает сервер, сохраняет текущую базу в `backups/tabbysync-prerestore-<время>.dump`, заменяет её дампом, проверяет расшифровку и запускает сервер. Принимаются только подтверждённые дампы с файлом `.sha256`. Чтобы отменить восстановление, восстановите страховочную копию тем же скриптом. Если текущую базу снять не удаётся (например, она повреждена), повторите с флагом `--no-snapshot`.
 
-```bash
-docker compose run --rm syncd user add alice
-```
+**Перенос на новый сервер:** выполните `setup.sh`, верните `secrets/` (как минимум `keyring`) и `.env` из резервной копии, положите дамп вместе с `.sha256` в `backups/` и запустите `restore.sh`.
 
-```bash
-docker compose run --rm syncd token create -user alice -name laptop
-```
+### Ротация мастер-ключа
 
-Токен печатается один раз. Caddy получает сертификат Let's Encrypt; для этого DNS-запись домена должна указывать на сервер, порты 80/443 — открыты.
-
-**За существующим nginx.** Если на сервере уже есть nginx с TLS, встроенный Caddy не нужен (он займёт порты 80/443). Перед `docker compose up`:
-
-```bash
-sudo cp nginx/compose.override.yaml compose.override.yaml
-```
-
-Compose подхватывает этот файл сам, поэтому его увидят и `up`, и `backup.sh`, и `restore.sh`, и cron. Он отключает Caddy, публикует `syncd` только на `127.0.0.1:8080` и доверяет `X-Forwarded-For` только от шлюза Docker-сети, через которую приходит nginx. Затем добавьте сайт из [deploy/nginx/tabby-sync.conf](deploy/nginx/tabby-sync.conf), заменив домен и пути к сертификату (например, от certbot), и выполните `nginx -t && systemctl reload nginx`. Что в нём важно:
-- `client_max_body_size 8m`: со значением по умолчанию (1 МБ) большие конфиги получат `413`;
-- `X-Forwarded-For $remote_addr` перезаписывает заголовок, так что клиент не подставит свой адрес;
-- `Host $host`: по нему CSRF-защита сверяет `Origin`;
-- заголовки HSTS и CSP ставит само приложение, повторять их в nginx не нужно.
-
-Проверено с nginx 1.22 (Debian 12): HTTP→HTTPS, HTTP/2, загрузка 1.9 МБ, настоящий IP клиента в логах при поддельном `X-Forwarded-For`, CSRF-проверка `Origin`, бэкап и восстановление.
-
-**Под путём на общем домене.** Если сервис должен жить не в корне домена, а, например, на `https://example.com/services/tabby-sync/` рядом с другими приложениями, добавьте в `deploy/.env` строку `TABBYSYNC_BASE_PATH=/services/tabby-sync`, а в существующий `server { ... }` nginx — блок из [deploy/nginx/tabby-sync-location.conf](deploy/nginx/tabby-sync-location.conf) (порт — как в `compose.override.yaml`). При этом:
-- сервис сам снимает префикс и отвечает `404` на всё вне него; ссылки, редиректы и `Location` содержат префикс;
-- cookie сессии получают `Path=<префикс>/` и приставку `__Secure-` вместо `__Host-` (та требует `Path=/`), поэтому другие приложения домена их не получают;
-- HSTS не отправляется: политика домена — дело его nginx, а `includeSubDomains` от одного сервиса задело бы все поддомены;
-- в Tabby адрес сервера указывается вместе с префиксом: `https://example.com/services/tabby-sync`.
-
-**Вход через веб (OIDC).** Подходит любой провайдер OpenID Connect (Google, Microsoft Entra ID, GitLab, Keycloak, Authentik, Auth0…). GitHub — не OIDC и не поддерживается. Зарегистрируйте у провайдера приложение с redirect URI `https://<домен>/auth/<id>/callback`, положите client secret в файл и добавьте в `deploy/.env`:
-
-```
-TABBYSYNC_OIDC_PROVIDERS=google
-TABBYSYNC_OIDC_GOOGLE_NAME=Google
-TABBYSYNC_OIDC_GOOGLE_ISSUER=https://accounts.google.com
-TABBYSYNC_OIDC_GOOGLE_CLIENT_ID=...apps.googleusercontent.com
-TABBYSYNC_OIDC_GOOGLE_CLIENT_SECRET_FILE=/run/oidc/google
-TABBYSYNC_ALLOWED_EMAILS=me@gmail.com
-```
-
-```bash
-sudo sh -c 'umask 077; cat > secrets/oidc/google && chown 65532:65532 secrets/oidc/google'
-```
-
-Пользователь определяется парой (issuer, subject), а не email. Email используется один раз, при первом входе, и только если провайдер подтвердил его (`email_verified`):
-- если администратор завёл пользователя с этим email (`syncd user add alice -email alice@example.com`), вход привязывается к нему;
-- иначе пользователь создаётся, только если email есть в `TABBYSYNC_ALLOWED_EMAILS` или его домен в `TABBYSYNC_ALLOWED_EMAIL_DOMAINS`;
-- в остальных случаях вход отклоняется.
-
-Выпуск токена в вебе требует свежего входа (`REAUTH_MAX_AGE`, 15 мин). Повторный вход запрашивается с `max_age=0`, и провайдер должен вернуть `auth_time` не раньше начала этого входа; иначе уже открытая сессия у провайдера (SSO) засчитывалась бы как повторный ввод пароля.
-
-**Ключи.** `deploy/secrets/keyring` нужно хранить отдельно от бэкапов базы. Без него данные не расшифровать, а лежащий рядом с бэкапом он делает шифрование бесполезным. Сервер не запустится, если keyring доступен кому-то кроме владельца (права должны быть 0400 или 0600).
-
-**Ротация KEK.**
-
-1. Выпустить новый ключ и добавить строку в `secrets/keyring`:
+1. Сгенерируйте новый ключ и добавьте выведенную строку в `secrets/keyring`:
    ```bash
-   docker compose run --rm syncd keys generate -id k202701
+   cd /opt/tabby-sync/deploy && sudo docker compose run --rm syncd keys generate -id k202701
    ```
-2. Указать `TABBYSYNC_KEK_PRIMARY=k202701` в `.env` и перезапустить сервер:
+2. Укажите `TABBYSYNC_KEK_PRIMARY=k202701` в `.env` и перезапустите сервер:
    ```bash
-   docker compose up -d syncd
+   cd /opt/tabby-sync/deploy && sudo docker compose up -d --wait syncd
    ```
-3. Переобернуть ключи данных существующих ревизий:
+3. Переоберните ключи данных существующих ревизий:
    ```bash
-   docker compose run --rm syncd keys rewrap
+   cd /opt/tabby-sync/deploy && sudo docker compose run --rm syncd keys rewrap
    ```
-4. Удалить старую строку из keyring.
+4. Удалите строку старого ключа из `secrets/keyring`.
 
-**Бэкапы.** Каждый день в 03:15 cron запускает `deploy/backup.sh`:
-1. `pg_dump` базы и ролей в `deploy/backups/`;
-2. восстановление дампа в отдельную временную базу и сверка версии схемы;
-3. `syncd verify` расшифровывает каждую ревизию восстановленной копии текущим keyring;
-4. только после этого файл получает имя `tabbysync-<время>.dump` и `.sha256`, а время пишется в `backups/LAST_SUCCESS`. Дамп, не прошедший проверку, остаётся `*.unverified`.
+### Обслуживание и ресурсы
 
-Хранятся дампы за `TABBYSYNC_BACKUP_KEEP_DAYS` (14) дней, но не меньше `TABBYSYNC_BACKUP_KEEP_MIN` (7) последних подтверждённых; страховочные копии `restore.sh` (см. ниже) — те же 14 дней. Вывод — в syslog (`journalctl -t tabby-sync-backup`). Бэкап и восстановление берут общую блокировку `backups/.lock`: если одно уже идёт (например, ручной бэкап совпал с ночным), второе сразу завершается с сообщением и ничего не трогает.
-
-Что нужно сделать самому:
-- **Следить за `backups/LAST_SUCCESS`.** Если файлу больше суток, бэкап не работает; оповещений сервис пока не шлёт.
-- **Копировать `backups/` за пределы сервера** (restic, rclone, borg). Дампы с одного диска не спасут от его потери.
-- **Хранить `secrets/keyring` и `.env` отдельно от дампов.** Без ключа дампы не расшифровать, а ключ рядом с ними делает шифрование бесполезным.
-
-**Восстановление после аварии.** На новом сервере: `setup.sh`, затем вернуть `secrets/` (как минимум `keyring`) и `.env` из надёжного места, положить дамп с его `.sha256` в `backups/` и выполнить:
+Каждый день в 03:45 cron запускает `syncd purge`. Он окончательно удаляет конфиги, удалённые более 30 дней назад (`TABBYSYNC_SOFT_DELETE_RETENTION`), а также истёкшие сессии, незавершённые попытки входа и ключи идемпотентности. Проверить целостность базы можно в любой момент:
 
 ```bash
-sudo ./restore.sh backups/tabbysync-<время>.dump
+cd /opt/tabby-sync/deploy && sudo docker compose run --rm --no-deps syncd verify
 ```
 
-Скрипт останавливает сервер, сохраняет текущую базу в `backups/tabbysync-prerestore-<время>.dump`, заменяет её дампом, проверяет расшифровку (`syncd verify`) и поднимает всё обратно. Неподтверждённые дампы он не принимает. Если восстановили не тот дамп, верните прежнее состояние тем же скриптом из страховочной копии:
-
-```bash
-sudo ./restore.sh backups/tabbysync-prerestore-<время>.dump
-```
-
-Если текущую базу снять не удаётся (например, она повреждена), скрипт ничего не восстанавливает и предлагает повторить с `--no-snapshot` — тогда без страховочной копии. Проверены сценарии «удалили том базы — восстановились из дампа» и «восстановили не тот дамп — откатились по страховочной копии».
-
-**Обслуживание.** В 03:45 cron запускает `syncd purge`: он окончательно стирает конфиги, удалённые раньше `SOFT_DELETE_RETENTION`, а также истёкшие сессии, брошенные попытки входа и ключи идемпотентности. Проверить целостность рабочей базы можно в любой момент:
-
-```bash
-sudo docker compose run --rm --no-deps syncd verify
-```
-
-**Ресурсы.** Логи контейнеров ограничены (10 МБ × 5 файлов на сервис). Лимиты памяти: Postgres 512 МБ, syncd 256 МБ (`GOMEMLIMIT` 200 МиБ), Caddy 128 МБ. У `syncd` есть healthcheck (`syncd health` проверяет `/readyz`, то есть и базу); Caddy стартует только после него.
+Логи контейнеров ограничены пятью файлами по 10 МБ на сервис. Лимиты памяти: PostgreSQL — 512 МБ, сервер — 256 МБ, Caddy — 128 МБ. У сервера есть healthcheck (проверяет и доступность базы); Caddy запускается только после него.
 
 ## Обновление
 
-Пример для установки в `/opt/tabby-sync`. Секреты, `.env`, `backups/` и `compose.override.yaml` в репозиторий не входят, поэтому обновление их не затрагивает.
+Секреты, `.env`, `backups/` и `compose.override.yaml` не входят в репозиторий, поэтому обновление их не затрагивает.
 
-**1. Архив нужной версии.** На своей машине, в клоне репозитория:
+1. Сделайте бэкап и пометьте текущий образ для возможного отката:
+   ```bash
+   cd /opt/tabby-sync/deploy && sudo ./backup.sh
+   ```
+   ```bash
+   sudo docker tag tabby-sync:local tabby-sync:prev
+   ```
+2. Получите новую версию:
+   ```bash
+   cd /opt/tabby-sync && sudo git pull
+   ```
+   Без git-клона на сервере используйте архив: `git archive --format=tar.gz -o tabby-sync.tar.gz HEAD` на своей машине, затем `tar -xzf tabby-sync.tar.gz -C /opt/tabby-sync` на сервере.
+3. Соберите образ, примените миграции и пересоздайте контейнеры:
+   ```bash
+   cd /opt/tabby-sync/deploy && sudo docker compose up -d --build --wait
+   ```
+4. Убедитесь, что сервер работает на новом образе:
+   ```bash
+   [ "$(sudo docker inspect tabby-sync-syncd-1 --format '{{.Image}}')" = "$(sudo docker image inspect tabby-sync:local --format '{{.Id}}')" ] && echo "syncd работает на свежем образе"
+   ```
 
-```bash
-git archive --format=tar.gz -o tabby-sync.tar.gz HEAD
-```
+`docker compose restart` не подхватывает новый образ — он перезапускает существующий контейнер. Используйте `docker compose up -d`. Образ собирается из каталога установки, поэтому изменения в других копиях репозитория в него не попадут.
 
-```bash
-scp tabby-sync.tar.gz root@<сервер>:/root/
-```
-
-Если на сервере лежит git-клон, вместо архива достаточно `git pull` в `/opt/tabby-sync`.
-
-**2. Бэкап и метка текущего образа для отката.** Новая версия может содержать миграции схемы.
-
-```bash
-cd /opt/tabby-sync/deploy && sudo ./backup.sh
-```
-
-```bash
-sudo docker tag tabby-sync:local tabby-sync:prev
-```
-
-**3. Распаковать поверх установки.** Права на скрипты (исполняемость для cron) берутся из архива.
-
-```bash
-sudo tar -xzf /root/tabby-sync.tar.gz -C /opt/tabby-sync
-```
-
-**4. Собрать образ, применить миграции и пересоздать контейнеры** — одной командой:
-
-```bash
-cd /opt/tabby-sync/deploy && sudo docker compose up -d --build --wait
-```
-
-**5. Убедиться, что работает новая версия:**
-
-```bash
-[ "$(sudo docker inspect tabby-sync-syncd-1 --format '{{.Image}}')" = "$(sudo docker image inspect tabby-sync:local --format '{{.Id}}')" ] && echo "syncd работает на свежем образе"
-```
-
-```bash
-cd /opt/tabby-sync/deploy && sudo docker compose ps
-```
-
-**Почему «пересобрал, а работает старая версия».** Частые причины:
-- `docker compose restart syncd` перезапускает **тот же** контейнер со старым образом. Новый образ подхватывает только `docker compose up -d`, который пересоздаёт контейнер.
-- После отдельного `docker compose build` нужен `docker compose up -d`, иначе собранный образ просто лежит.
-- `docker compose run --rm syncd …` всегда берёт текущий образ. Поэтому новая команда CLI может уже работать, а сервер — ещё нет; проверьте шагом 5.
-- Образ собирается из каталога установки (`/opt/tabby-sync`, контекст `..` от `deploy/`). Правки `main.go` в другом месте, например в отдельном клоне, в образ не попадут.
-- До этой версии у сервиса `syncd` не было своего `build:` в `compose.yaml`: `docker compose build syncd` отвечал «No services to build», а `up -d --build --no-deps syncd` молча оставлял старый образ.
-
-**Откат.** Вернуть предыдущий образ (без `--build`, иначе он соберётся заново из новых файлов):
+**Откат.** Верните предыдущий образ без пересборки:
 
 ```bash
 cd /opt/tabby-sync/deploy && sudo docker tag tabby-sync:prev tabby-sync:local && sudo docker compose up -d --wait
 ```
 
-Если новая версия успела применить миграции, старый код может не подойти к схеме. Тогда восстановите бэкап из шага 2: `sudo ./restore.sh backups/tabbysync-<время>.dump` (он тоже не пересобирает образ).
+Если новая версия уже применила миграции схемы, восстановите также бэкап из шага 1 с помощью `restore.sh`. Неиспользуемые образы удаляются командой `sudo docker image prune -f`.
 
-Старые неиспользуемые образы можно удалить командой `sudo docker image prune -f`.
+## Настройки
 
-## Команды
+Сервер настраивается переменными окружения. Для секретов можно указать путь к файлу, добавив к имени `_FILE` (например, `TABBYSYNC_DATABASE_URL_FILE`). В развёртывании через Docker Compose переменные задаются в `deploy/.env`.
 
-```
-syncd serve
-syncd migrate up|down|status|version
-syncd user add <name> [-email addr]
-syncd user set-email <name> <addr|->           # email для привязки первого входа через веб; "-" очищает
-syncd user list|disable|enable <name>
-syncd token create -user U -name N [-scopes configs:read,configs:write,user:read] [-ttl 8760h]
-syncd token import-legacy -user U -name N      # токен Tabby Web со stdin
-syncd token list -user U
-syncd token revoke -user U (-id DEVICE | -all)
-syncd keys generate -id ID
-syncd keys rewrap
-syncd purge
-syncd verify [-database NAME]                  # расшифровать все ревизии, проверить целостность
-syncd health                                   # healthcheck контейнера
-```
-
-Права токена: `configs:read`, `configs:write`, `user:read`, `user:write`. Отключение пользователя (`user disable`) сразу аннулирует все его токены.
-
-## Настройки (переменные окружения)
-
-| Переменная | По умолчанию | |
+| Переменная | По умолчанию | Описание |
 |---|---|---|
-| `TABBYSYNC_LISTEN` | `127.0.0.1:8080` (в образе `:8080`) | адрес |
-| `TABBYSYNC_TLS_CERT_FILE` / `_KEY_FILE` | — | TLS без прокси |
-| `TABBYSYNC_DATABASE_URL` / `_FILE` | — | строка подключения Postgres |
-| `TABBYSYNC_KEYRING_FILE`, `TABBYSYNC_KEK_PRIMARY` | — | keyring и основной ключ |
-| `TABBYSYNC_TRUSTED_PROXIES` | — | IP/CIDR прокси, которым верим в `X-Forwarded-For` |
-| `TABBYSYNC_CORS_ALLOWED_ORIGINS` | `*` | API без cookie, поэтому `*` безопасен; можно сузить |
-| `TABBYSYNC_MAX_CONFIG_BYTES` | 2 MiB | |
-| `TABBYSYNC_MAX_CONFIGS_PER_USER` | 100 | |
-| `TABBYSYNC_REVISIONS_KEEP_MIN` / `_MAX_AGE` / `_HARD_CAP` | 20 / 720h / 500 | история |
-| `TABBYSYNC_SOFT_DELETE_RETENTION` | 720h | |
-| `TABBYSYNC_RATE_IP_RPS` / `_BURST` | 20 / 60 | до аутентификации |
-| `TABBYSYNC_RATE_AUTH_FAIL_PER_MIN` / `_BURST` | 10 / 10 | неудачные токены с IP |
-| `TABBYSYNC_RATE_DEVICE_RPS` / `_BURST` | 5 / 30 | на устройство |
-| `TABBYSYNC_LOG_LEVEL` | `info` | |
+| `TABBYSYNC_LISTEN` | `127.0.0.1:8080` (в образе `:8080`) | адрес HTTP-сервера |
+| `TABBYSYNC_TLS_CERT_FILE`, `TABBYSYNC_TLS_KEY_FILE` | — | сертификат и ключ, если сервер сам принимает TLS |
+| `TABBYSYNC_DATABASE_URL` | — | строка подключения к PostgreSQL |
+| `TABBYSYNC_KEYRING_FILE` | — | файл с мастер-ключами |
+| `TABBYSYNC_KEK_PRIMARY` | — | идентификатор основного мастер-ключа |
+| `TABBYSYNC_PUBLIC_URL` | — | внешний адрес сервиса с префиксом; обязателен для OIDC |
 | `TABBYSYNC_BASE_PATH` | — | префикс пути на общем домене, например `/services/tabby-sync` |
-| `TABBYSYNC_PUBLIC_URL` | — | `https://домен`, обязателен с OIDC (в compose задаётся из `TABBYSYNC_DOMAIN`) |
-| `TABBYSYNC_OIDC_PROVIDERS` | — | id провайдеров через запятую; для каждого `TABBYSYNC_OIDC_<ID>_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET` / `_FILE`, `_NAME`, `_SCOPES` |
-| `TABBYSYNC_ALLOWED_EMAILS` / `_EMAIL_DOMAINS` | — | кому разрешена регистрация при первом входе |
-| `TABBYSYNC_SESSION_IDLE` / `_MAX_AGE` | 30m / 12h | веб-сессии |
-| `TABBYSYNC_REAUTH_MAX_AGE` | 15m | давность входа для выпуска токена |
+| `TABBYSYNC_TRUSTED_PROXIES` | — | адреса или подсети прокси, которым разрешено передавать `X-Forwarded-For` |
+| `TABBYSYNC_CORS_ALLOWED_ORIGINS` | `*` | разрешённые источники CORS для API |
+| `TABBYSYNC_OIDC_PROVIDERS` | — | идентификаторы OIDC-провайдеров через запятую |
+| `TABBYSYNC_OIDC_<ID>_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET`, `_NAME`, `_SCOPES` | `_SCOPES`: `openid,email,profile` | настройки провайдера `<ID>` |
+| `TABBYSYNC_ALLOWED_EMAILS`, `TABBYSYNC_ALLOWED_EMAIL_DOMAINS` | — | кому разрешена регистрация при первом входе |
+| `TABBYSYNC_SESSION_IDLE` | `30m` | срок бездействия веб-сессии |
+| `TABBYSYNC_SESSION_MAX_AGE` | `12h` | максимальный срок веб-сессии |
+| `TABBYSYNC_REAUTH_MAX_AGE` | `15m` | максимальная давность входа для выпуска токена |
+| `TABBYSYNC_MAX_CONFIG_BYTES` | `2097152` (2 МиБ) | максимальный размер конфига |
+| `TABBYSYNC_MAX_CONFIGS_PER_USER` | `100` | максимальное число конфигов у пользователя |
+| `TABBYSYNC_REVISIONS_KEEP_MIN` | `20` | сколько последних ревизий хранится всегда |
+| `TABBYSYNC_REVISIONS_MAX_AGE` | `720h` | более старые ревизии сверх минимума удаляются |
+| `TABBYSYNC_REVISIONS_HARD_CAP` | `500` | максимальное число ревизий одного конфига |
+| `TABBYSYNC_SOFT_DELETE_RETENTION` | `720h` | через сколько удалённые конфиги стираются окончательно |
+| `TABBYSYNC_RATE_IP_RPS`, `_BURST` | `20`, `60` | лимит запросов с одного адреса |
+| `TABBYSYNC_RATE_AUTH_FAIL_PER_MIN`, `_BURST` | `10`, `10` | лимит неудачных попыток аутентификации с одного адреса |
+| `TABBYSYNC_RATE_DEVICE_RPS`, `_BURST` | `5`, `30` | лимит запросов одного устройства |
+| `TABBYSYNC_LOG_LEVEL` | `info` | уровень журнала (`debug`, `info`, `warn`, `error`) |
 
 ## Разработка
+
+Требуется Go 1.26 или новее. Для интеграционных тестов нужен Docker (PostgreSQL запускается через testcontainers) или переменная `TABBYSYNC_TEST_DATABASE_URL` с адресом базы, где разрешено создавать базы данных.
 
 ```bash
 go test ./...
 ```
 
-Интеграционные тесты поднимают Postgres через testcontainers (нужен Docker) или берут `TABBYSYNC_TEST_DATABASE_URL`. Без БД они пропускаются; `TABBYSYNC_REQUIRE_DB=1` (стоит в CI) превращает пропуск в ошибку. Посмотреть веб-интерфейс локально с фейковым OIDC-провайдером: `TABBYSYNC_PREVIEW=1 go test -run TestPreview -timeout 15m ./internal/httpapi`, затем http://localhost:18080.
+Без доступной базы интеграционные тесты пропускаются; `TABBYSYNC_REQUIRE_DB=1` превращает пропуск в ошибку.
 
-CI также запускает `golangci-lint` (с gosec), `govulncheck`, `-race`, фаззинг валидации, а для тегов собирает образ с SBOM, провенансом и подписью cosign.
+Посмотреть веб-интерфейс локально с тестовым OIDC-провайдером (откроется на http://localhost:18080):
+
+```bash
+TABBYSYNC_PREVIEW=1 go test -run TestPreview -timeout 15m ./internal/httpapi
+```
+
+Структура проекта:
+
+```
+cmd/syncd/           сервер и CLI
+internal/auth/       токены устройств
+internal/config/     загрузка настроек
+internal/configs/    логика конфигов и ревизий
+internal/crypto/     envelope encryption и keyring
+internal/httpapi/    HTTP: API v1/v2, веб-интерфейс, OIDC, middleware
+internal/store/      доступ к PostgreSQL и миграции
+deploy/              Docker Compose, скрипты установки, бэкапа и восстановления
+```
+
+CI запускает `golangci-lint` (включая gosec), `govulncheck`, тесты с `-race` и фаззинг валидации; для тегов собирается образ с SBOM, provenance и подписью cosign.
+
+## Лицензия
+
+[MIT](LICENSE)
