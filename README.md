@@ -153,6 +153,71 @@ sudo docker compose run --rm --no-deps syncd verify
 
 **Ресурсы.** Логи контейнеров ограничены (10 МБ × 5 файлов на сервис). Лимиты памяти: Postgres 512 МБ, syncd 256 МБ (`GOMEMLIMIT` 200 МиБ), Caddy 128 МБ. У `syncd` есть healthcheck (`syncd health` проверяет `/readyz`, то есть и базу); Caddy стартует только после него.
 
+## Обновление
+
+Пример для установки в `/opt/tabby-sync`. Секреты, `.env`, `backups/` и `compose.override.yaml` в репозиторий не входят, поэтому обновление их не затрагивает.
+
+**1. Архив нужной версии.** На своей машине, в клоне репозитория:
+
+```bash
+git archive --format=tar.gz -o tabby-sync.tar.gz HEAD
+```
+
+```bash
+scp tabby-sync.tar.gz root@<сервер>:/root/
+```
+
+Если на сервере лежит git-клон, вместо архива достаточно `git pull` в `/opt/tabby-sync`.
+
+**2. Бэкап и метка текущего образа для отката.** Новая версия может содержать миграции схемы.
+
+```bash
+cd /opt/tabby-sync/deploy && sudo ./backup.sh
+```
+
+```bash
+sudo docker tag tabby-sync:local tabby-sync:prev
+```
+
+**3. Распаковать поверх установки.** Права на скрипты (исполняемость для cron) берутся из архива.
+
+```bash
+sudo tar -xzf /root/tabby-sync.tar.gz -C /opt/tabby-sync
+```
+
+**4. Собрать образ, применить миграции и пересоздать контейнеры** — одной командой:
+
+```bash
+cd /opt/tabby-sync/deploy && sudo docker compose up -d --build --wait
+```
+
+**5. Убедиться, что работает новая версия:**
+
+```bash
+[ "$(sudo docker inspect tabby-sync-syncd-1 --format '{{.Image}}')" = "$(sudo docker image inspect tabby-sync:local --format '{{.Id}}')" ] && echo "syncd работает на свежем образе"
+```
+
+```bash
+cd /opt/tabby-sync/deploy && sudo docker compose ps
+```
+
+**Почему «пересобрал, а работает старая версия».** Частые причины:
+- `docker compose restart syncd` перезапускает **тот же** контейнер со старым образом. Новый образ подхватывает только `docker compose up -d`, который пересоздаёт контейнер.
+- После отдельного `docker compose build` нужен `docker compose up -d`, иначе собранный образ просто лежит.
+- `docker compose run --rm syncd …` всегда берёт текущий образ. Поэтому новая команда CLI может уже работать, а сервер — ещё нет; проверьте шагом 5.
+- Образ собирается из каталога установки (`/opt/tabby-sync`, контекст `..` от `deploy/`). Правки `main.go` в другом месте, например в отдельном клоне, в образ не попадут.
+- До этой версии у сервиса `syncd` не было своего `build:` в `compose.yaml`: `docker compose build syncd` отвечал «No services to build», а `up -d --build --no-deps syncd` молча оставлял старый образ.
+
+**Откат.** Вернуть предыдущий образ (без `--build`, иначе он соберётся заново из новых файлов):
+
+```bash
+cd /opt/tabby-sync/deploy && sudo docker tag tabby-sync:prev tabby-sync:local && sudo docker compose up -d --wait
+```
+
+Если новая версия успела применить миграции, старый код может не подойти к схеме. Тогда восстановите бэкап из шага 2: `sudo ./restore.sh backups/tabbysync-<время>.dump` (он тоже не пересобирает образ).
+
+Старые неиспользуемые образы можно удалить командой `sudo docker image prune -f`.
+
 ## Команды
 
 ```

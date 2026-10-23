@@ -58,6 +58,9 @@ services:
 
   syncd:
     <<: *hardening
+    # Same build as migrate: without it "docker compose build syncd" and
+    # "up --build --no-deps syncd" silently keep the old image.
+    build: ..
     image: tabby-sync:local
     command: ["serve"]
     # OIDC settings (TABBYSYNC_OIDC_*, TABBYSYNC_ALLOWED_*) come from .env;
